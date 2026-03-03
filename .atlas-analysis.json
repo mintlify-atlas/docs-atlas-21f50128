@@ -1,0 +1,108 @@
+{
+  "projectType": "saas",
+  "projectName": "Rubber Duck",
+  "projectDescription": "Voice-first coding companion for macOS - hold a hotkey, speak to your codebase, hear answers back with full terminal transparency.",
+  "theme": "aspen",
+  "primaryColor": "#F59E0B",
+  "lightColor": "#FCD34D",
+  "darkColor": "#D97706",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "installation",
+              "quickstart"
+            ]
+          },
+          {
+            "group": "Core Features",
+            "pages": [
+              "features/voice-interface",
+              "features/cli-commands",
+              "features/sessions",
+              "features/interruptions"
+            ]
+          },
+          {
+            "group": "CLI Reference",
+            "pages": [
+              "cli/overview",
+              "cli/commands",
+              "cli/output-format",
+              "cli/daemon"
+            ]
+          },
+          {
+            "group": "Architecture",
+            "pages": [
+              "architecture/overview",
+              "architecture/voice-pipeline",
+              "architecture/pi-integration",
+              "architecture/session-model"
+            ]
+          },
+          {
+            "group": "Guides",
+            "pages": [
+              "guides/multi-session-workflow",
+              "guides/background-tasks",
+              "guides/configuration",
+              "guides/troubleshooting"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "CLI API",
+            "pages": [
+              "api/daemon-client",
+              "api/renderer",
+              "api/types"
+            ]
+          },
+          {
+            "group": "Voice Tools",
+            "pages": [
+              "api/voice-tools/overview",
+              "api/voice-tools/file-operations",
+              "api/voice-tools/bash",
+              "api/voice-tools/search"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Voice-first interface with push-to-talk hotkey",
+    "Instant interruptions with barge-in support",
+    "Full terminal transparency for all operations",
+    "Multi-session support with concurrent workflows",
+    "Integrated Pi coding agent for tool execution",
+    "Unix socket-based daemon architecture",
+    "Streaming tool output and real-time updates",
+    "Background task execution with notifications"
+  ],
+  "publicApiSurface": [
+    "duck [path] - Attach workspace and stream events",
+    "duck say <message> - Send typed message to session",
+    "duck sessions [--all] - List active sessions",
+    "duck doctor - Check system health",
+    "DaemonClient - Unix socket NDJSON client",
+    "createRenderer() - Factory for text/JSON renderers",
+    "voice_tool_call - Execute tools from voice interface",
+    "voice_connect - Establish voice session",
+    "voice_state - Query voice session state",
+    "attach - Attach workspace to daemon",
+    "follow - Stream session events",
+    "extension_ui_response - Handle UI prompts"
+  ]
+}
