@@ -1,6 +1,6 @@
 ---
 title: 'Search Tools'
-description: 'Search code with grep_search and find_files'
+description: 'Search code with grep_search and find_files, and the web with web_search'
 ---
 
 ## grep_search
@@ -362,9 +362,202 @@ Patterns are matched against multiple path formats for flexibility:
 - **Search-relative**: `"config.ts"` (if searching in `src/`)
 - **Leading slash variants**: `"/src/config.ts"`
 
+---
+
+## web_search
+
+Search the web using the Exa API to find relevant information, documentation, and resources.
+
+<Warning>
+  Requires `EXA_API_KEY` or `RUBBER_DUCK_EXA_API_KEY` environment variable to be set.
+</Warning>
+
+### Parameters
+
+<ParamField path="query" type="string" required>
+  Search query string. Accepts alternative keys: `q`, `search`, `prompt`.
+</ParamField>
+
+<ParamField path="num_results" type="number" default={10}>
+  Number of results to return (1-10). Accepts alternative key: `numResults`.
+</ParamField>
+
+<ParamField path="include_text" type="boolean" default={false}>
+  Include page content snippets in results. Accepts alternative key: `includeText`.
+</ParamField>
+
+<ParamField path="include_domains" type="string[]">
+  Only search specific domains (e.g., `["github.com", "docs.python.org"]`). Accepts alternative keys: `includeDomains`, `domains`.
+</ParamField>
+
+<ParamField path="exclude_domains" type="string[]">
+  Exclude specific domains from results. Accepts alternative key: `excludeDomains`.
+</ParamField>
+
+### Returns
+
+<ResponseField name="result" type="string">
+  Formatted list of search results with titles, URLs, scores, published dates, and optional text snippets. Output is truncated at 100 KB.
+</ResponseField>
+
+### Behavior
+
+- Sends search request to Exa API endpoint
+- 30-second timeout per request
+- Results ranked by relevance score
+- Text snippets truncated at 400 characters
+- Supports domain filtering
+- Returns `"No web results found"` if no matches
+
+### Examples
+
+<CodeGroup>
+```json Basic Search
+{
+  "query": "rust async programming tutorial"
+}
+```
+
+```json With Text Snippets
+{
+  "query": "typescript decorators",
+  "include_text": true,
+  "num_results": 5
+}
+```
+
+```json Domain-Specific Search
+{
+  "query": "react hooks",
+  "include_domains": ["react.dev", "github.com"]
+}
+```
+
+```json Exclude Domains
+{
+  "query": "machine learning",
+  "exclude_domains": ["medium.com"],
+  "num_results": 8
+}
+```
+</CodeGroup>
+
+### Success Response
+
+```text
+1. Rust Async Book
+   URL: https://rust-lang.github.io/async-book/
+   Published: 2023-11-15
+   Score: 0.892
+
+2. Asynchronous Programming in Rust
+   URL: https://tokio.rs/tokio/tutorial
+   Score: 0.845
+
+3. Rust Async/.await Primer
+   URL: https://rust-lang.org/async-await
+   Score: 0.801
+```
+
+### With Text Snippets
+
+```text
+1. TypeScript Decorators
+   URL: https://www.typescriptlang.org/docs/handbook/decorators.html
+   Score: 0.923
+   Snippet: Decorators provide a way to add both annotations and a meta-programming syntax for class declarations and members. Decorators are a stage 2 proposal for JavaScript and are available as an experimental feature of TypeScript...
+
+2. TC39 Decorator Proposal
+   URL: https://github.com/tc39/proposal-decorators
+   Score: 0.887
+   Snippet: This proposal adds decorators to JavaScript, which are functions that can be used to metaprogram and add functionality to a value. Decorators can be attached to classes, methods, accessors, properties, and more...
+```
+
+### Error Responses
+
+```text
+Error: EXA_API_KEY not configured. Set EXA_API_KEY (or RUBBER_DUCK_EXA_API_KEY) to enable web_search.
+```
+
+```text
+Error: Missing required parameter 'query'
+```
+
+```text
+Error: web_search request timed out after 30000ms
+```
+
+```text
+Error: web_search failed (401 Unauthorized): Invalid API key
+```
+
+### Implementation Details
+
+From `voice-tools.ts:749-1001`:
+
+```typescript
+async function webSearch(args: Record<string, unknown>): Promise<string> {
+  const config = parseWebSearchConfig(args);
+  if (typeof config === "string") {
+    return config;
+  }
+
+  const apiKey =
+    process.env.RUBBER_DUCK_EXA_API_KEY ?? process.env.EXA_API_KEY ?? "";
+  if (!apiKey) {
+    return "Error: EXA_API_KEY not configured. Set EXA_API_KEY (or RUBBER_DUCK_EXA_API_KEY) to enable web_search.";
+  }
+
+  const payload = await fetchWebSearchResults(
+    apiKey,
+    buildWebSearchBody(config)
+  );
+  if (typeof payload === "string") {
+    return payload;
+  }
+
+  if (!(isRecord(payload) && Array.isArray(payload.results))) {
+    return "Error: web_search response missing expected 'results' array";
+  }
+
+  return formatWebSearchResults(
+    payload.results,
+    config.query,
+    config.includeText
+  );
+}
+```
+
+### API Configuration
+
+From `voice-tools.ts:34-36`:
+
+```typescript
+const EXA_SEARCH_ENDPOINT = "https://api.exa.ai/search";
+const WEB_SEARCH_TIMEOUT_MS = 30_000;
+const WEB_SEARCH_MAX_RESULTS = 10;
+const WEB_SEARCH_DEFAULT_RESULTS = 10;
+```
+
+### Environment Variables
+
+Set one of the following to enable web search:
+
+```bash
+# Primary (preferred)
+export EXA_API_KEY="your-exa-api-key"
+
+# Alternative
+export RUBBER_DUCK_EXA_API_KEY="your-exa-api-key"
+```
+
+Get an API key at [exa.ai](https://exa.ai).
+
+---
+
 ## Comparison
 
-<CardGroup cols={2}>
+<CardGroup cols={3}>
   <Card title="grep_search" icon="magnifying-glass">
     **Use for**: Searching file **contents**
     
@@ -381,6 +574,15 @@ Patterns are matched against multiple path formats for flexibility:
     - Find configuration files
     - Discover files by extension
     - Build file inventories
+  </Card>
+  
+  <Card title="web_search" icon="globe">
+    **Use for**: Finding **web resources**
+    
+    - Lookup API documentation
+    - Find tutorials and guides
+    - Research libraries and tools
+    - Discover relevant examples
   </Card>
 </CardGroup>
 

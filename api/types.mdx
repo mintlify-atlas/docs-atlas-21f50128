@@ -612,3 +612,213 @@ client.onEvent(async (daemonEvent) => {
   }
 });
 ```
+
+---
+
+## Constants
+
+Path constants exported by the CLI for locating runtime files.
+
+### APP_SUPPORT
+
+```typescript
+const APP_SUPPORT: string
+```
+
+Application support directory path.
+
+**Default**: `~/Library/Application Support/RubberDuck`
+
+**Override**: Set `RUBBER_DUCK_APP_SUPPORT` environment variable.
+
+### SOCKET_PATH
+
+```typescript
+const SOCKET_PATH: string
+```
+
+Unix domain socket path for daemon IPC.
+
+**Default**: `~/Library/Application Support/RubberDuck/daemon.sock`
+
+**Fallback**: `$TMPDIR/duck-<hash>.sock` if default path exceeds Unix socket length limit.
+
+### METADATA_PATH
+
+```typescript
+const METADATA_PATH: string
+```
+
+Path to daemon metadata store (workspaces and sessions).
+
+**Value**: `~/Library/Application Support/RubberDuck/metadata.json`
+
+### CONFIG_PATH
+
+```typescript
+const CONFIG_PATH: string
+```
+
+Path to daemon configuration file.
+
+**Value**: `~/Library/Application Support/RubberDuck/config.json`
+
+### LOG_PATH
+
+```typescript
+const LOG_PATH: string
+```
+
+Path to daemon lifecycle log.
+
+**Value**: `~/Library/Application Support/RubberDuck/duck-daemon.log`
+
+### SESSIONS_DIR
+
+```typescript
+const SESSIONS_DIR: string
+```
+
+Directory containing Pi session files.
+
+**Value**: `~/Library/Application Support/RubberDuck/pi-sessions/`
+
+### Usage Example
+
+```typescript
+import { 
+  APP_SUPPORT, 
+  SOCKET_PATH, 
+  METADATA_PATH,
+  SESSIONS_DIR 
+} from 'duck';
+
+console.log('App support:', APP_SUPPORT);
+console.log('Daemon socket:', SOCKET_PATH);
+console.log('Sessions:', SESSIONS_DIR);
+```
+
+---
+
+## Utility Functions
+
+Helper functions exported by the CLI for workspace and path management.
+
+### workspaceId
+
+```typescript
+function workspaceId(absolutePath: string): string
+```
+
+Generate a stable workspace ID from an absolute path.
+
+**Parameters:**
+- `absolutePath` — Absolute filesystem path
+
+**Returns:** SHA-256 hash (first 16 hex chars) of the normalized path.
+
+**Example:**
+
+```typescript
+import { workspaceId } from 'duck';
+
+const id = workspaceId('/Users/alice/projects/my-app');
+// => "7f3a8b2c9d1e4f56"
+```
+
+### findGitRoot
+
+```typescript
+function findGitRoot(startPath: string): string | null
+```
+
+Find the nearest `.git` directory by walking up from `startPath`.
+
+**Parameters:**
+- `startPath` — Starting directory path
+
+**Returns:** Absolute path to Git repository root, or `null` if not found.
+
+**Example:**
+
+```typescript
+import { findGitRoot } from 'duck';
+
+const gitRoot = findGitRoot('/Users/alice/projects/my-app/src');
+// => "/Users/alice/projects/my-app"
+```
+
+### resolveWorkspacePath
+
+```typescript
+async function resolveWorkspacePath(
+  pathArg: string | undefined
+): Promise<string>
+```
+
+Resolve a workspace path argument to an absolute path.
+
+**Parameters:**
+- `pathArg` — Path string (relative, absolute, or undefined for cwd)
+
+**Returns:** Absolute path, preferring Git root if found.
+
+**Behavior:**
+1. If `pathArg` is undefined, use `process.cwd()`
+2. Resolve relative paths against cwd
+3. Check for `.git` directory and return repo root if found
+4. Otherwise return the resolved absolute path
+
+**Example:**
+
+```typescript
+import { resolveWorkspacePath } from 'duck';
+
+// From /Users/alice/projects/my-app/src
+const workspace = await resolveWorkspacePath('.');
+// => "/Users/alice/projects/my-app" (Git root)
+
+const absolute = await resolveWorkspacePath('/tmp/sandbox');
+// => "/tmp/sandbox"
+```
+
+### generateId
+
+```typescript
+function generateId(): string
+```
+
+Generate a unique ID for requests or sessions.
+
+**Returns:** Random 22-character base64url string.
+
+**Example:**
+
+```typescript
+import { generateId } from 'duck';
+
+const requestId = generateId();
+// => "k3x7n2m9p4q8r1s5t6u0"
+```
+
+### formatTimestamp
+
+```typescript
+function formatTimestamp(date: Date): string
+```
+
+Format a timestamp for display.
+
+**Parameters:**
+- `date` — Date object
+
+**Returns:** ISO 8601 timestamp string (local timezone).
+
+**Example:**
+
+```typescript
+import { formatTimestamp } from 'duck';
+
+const now = formatTimestamp(new Date());
+// => "2026-03-03T10:15:30.123-08:00"
+```
