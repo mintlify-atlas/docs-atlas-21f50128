@@ -1,0 +1,381 @@
+---
+title: 'File Operations'
+description: 'Read, write, and edit files in the workspace'
+---
+
+## read_file
+
+Read the contents of a file from the workspace.
+
+### Parameters
+
+<ParamField path="path" type="string" required>
+  Path to the file, relative to workspace root or absolute. Accepts alternative keys: `file`, `filepath`, `file_path`, `filename`.
+</ParamField>
+
+### Returns
+
+<ResponseField name="result" type="string">
+  File contents as UTF-8 string, or an error message prefixed with `"Error: "`.
+</ResponseField>
+
+### Behavior
+
+- Resolves relative paths against the workspace root
+- Validates path stays within workspace boundaries
+- Rejects files larger than 1 MB
+- Returns canonical error messages for missing files
+
+### Examples
+
+<CodeGroup>
+```json Request
+{
+  "path": "src/config.ts"
+}
+```
+
+```text Success Response
+export const config = {
+  apiKey: process.env.API_KEY,
+  timeout: 5000
+};
+```
+
+```text Error: File Not Found
+Error: File not found at 'src/missing.ts'
+```
+
+```text Error: Path Escape
+Error: Path escapes workspace root
+```
+
+```text Error: File Too Large
+Error: File exceeds 1MB limit (2097152 bytes)
+```
+</CodeGroup>
+
+### Implementation Details
+
+From `voice-tools.ts:236-272`:
+
+```typescript
+async function readFile(
+  args: Record<string, unknown>,
+  workspaceRoot: string
+): Promise<string> {
+  const path = extractStringArg(args, [
+    "path",
+    "file",
+    "filepath",
+    "file_path",
+    "filename",
+  ]);
+  if (!path) {
+    return "Error: Missing required parameter 'path'";
+  }
+
+  const resolved = await resolvePath(path, workspaceRoot);
+  if (!resolved) {
+    return "Error: Path escapes workspace root";
+  }
+
+  if (!existsSync(resolved)) {
+    return `Error: File not found at '${path}'`;
+  }
+
+  try {
+    const s = statSync(resolved);
+    if (s.size > MAX_FILE_BYTES) {
+      return `Error: File exceeds 1MB limit (${s.size} bytes)`;
+    }
+    return readFileSync(resolved, "utf8");
+  } catch (err) {
+    return `Error: Failed to read file: ${String(err)}`;
+  }
+}
+```
+
+---
+
+## write_file
+
+Create a new file or overwrite an existing file with the provided content.
+
+<Warning>
+  This tool is **disabled in safe mode**. Attempting to use it will return an error.
+</Warning>
+
+### Parameters
+
+<ParamField path="path" type="string" required>
+  Path to the file, relative to workspace root or absolute. Accepts alternative keys: `file`, `filepath`, `file_path`, `filename`.
+</ParamField>
+
+<ParamField path="content" type="string" required>
+  UTF-8 content to write to the file.
+</ParamField>
+
+### Returns
+
+<ResponseField name="result" type="string">
+  Success message with byte count, or an error message prefixed with `"Error: "`.
+</ResponseField>
+
+### Behavior
+
+- Creates parent directories automatically using `mkdir -p` semantics
+- Overwrites existing files without warning
+- Validates path stays within workspace boundaries
+- Returns error if safe mode is enabled
+
+### Examples
+
+<CodeGroup>
+```json Request
+{
+  "path": "src/config.ts",
+  "content": "export const API_KEY = 'sk-test';\n"
+}
+```
+
+```text Success Response
+Successfully wrote 35 bytes to src/config.ts
+```
+
+```text Error: Safe Mode
+Error: write_file is disabled in safe mode
+```
+
+```text Error: Missing Content
+Error: Missing required parameter 'content'
+```
+</CodeGroup>
+
+### Implementation Details
+
+From `voice-tools.ts:274-316`:
+
+```typescript
+async function writeFile(
+  args: Record<string, unknown>,
+  workspaceRoot: string,
+  safeMode: boolean
+): Promise<string> {
+  if (safeMode) {
+    return "Error: write_file is disabled in safe mode";
+  }
+
+  const path = extractStringArg(args, [
+    "path",
+    "file",
+    "filepath",
+    "file_path",
+    "filename",
+  ]);
+  if (!path) {
+    return "Error: Missing required parameter 'path'";
+  }
+
+  const content = args.content;
+  if (typeof content !== "string") {
+    return "Error: Missing required parameter 'content'";
+  }
+
+  const resolved = await resolvePath(path, workspaceRoot);
+  if (!resolved) {
+    return "Error: Path escapes workspace root";
+  }
+
+  try {
+    mkdirSync(dirname(resolved), { recursive: true });
+    const data = Buffer.from(content, "utf8");
+    writeFileSync(resolved, data);
+    return `Successfully wrote ${data.byteLength} bytes to ${path}`;
+  } catch (err) {
+    return `Error: Failed to write file: ${String(err)}`;
+  }
+}
+```
+
+---
+
+## edit_file
+
+Make a targeted edit to an existing file using find-and-replace.
+
+<Warning>
+  This tool is **disabled in safe mode**. Attempting to use it will return an error.
+</Warning>
+
+### Parameters
+
+<ParamField path="path" type="string" required>
+  Path to the file, relative to workspace root or absolute. Accepts alternative keys: `file`, `filepath`, `file_path`, `filename`.
+</ParamField>
+
+<ParamField path="old_text" type="string" required>
+  Exact text to find in the file. Accepts alternative keys: `oldText`, `find`. Must match exactly once.
+</ParamField>
+
+<ParamField path="new_text" type="string" required>
+  Replacement text. Accepts alternative keys: `newText`, `replace`.
+</ParamField>
+
+### Returns
+
+<ResponseField name="result" type="string">
+  Success message, or an error message prefixed with `"Error: "`.
+</ResponseField>
+
+### Behavior
+
+- Requires exact match of `old_text` (case-sensitive)
+- Rejects ambiguous edits if `old_text` appears multiple times
+- Returns error if `old_text` is not found
+- Atomic operation: writes only if validation passes
+
+### Examples
+
+<CodeGroup>
+```json Request
+{
+  "path": "src/config.ts",
+  "old_text": "timeout: 5000",
+  "new_text": "timeout: 10000"
+}
+```
+
+```text Success Response
+Successfully edited src/config.ts
+```
+
+```text Error: Not Found
+Error: old_text not found in file
+```
+
+```text Error: Ambiguous
+Error: old_text found 3 times (ambiguous edit)
+```
+
+```text Error: Safe Mode
+Error: edit_file is disabled in safe mode
+```
+</CodeGroup>
+
+### Implementation Details
+
+From `voice-tools.ts:318-373`:
+
+```typescript
+async function editFile(
+  args: Record<string, unknown>,
+  workspaceRoot: string,
+  safeMode: boolean
+): Promise<string> {
+  if (safeMode) {
+    return "Error: edit_file is disabled in safe mode";
+  }
+
+  const path = extractStringArg(args, [
+    "path",
+    "file",
+    "filepath",
+    "file_path",
+    "filename",
+  ]);
+  if (!path) {
+    return "Error: Missing required parameter 'path'";
+  }
+
+  const oldText = extractStringArg(args, ["old_text", "oldText", "find"]);
+  if (!oldText) {
+    return "Error: Missing required parameter 'old_text'";
+  }
+
+  const newText = extractStringArg(args, ["new_text", "newText", "replace"]);
+  if (!newText) {
+    return "Error: Missing required parameter 'new_text'";
+  }
+
+  const resolved = await resolvePath(path, workspaceRoot);
+  if (!resolved) {
+    return "Error: Path escapes workspace root";
+  }
+
+  try {
+    const content = readFileSync(resolved, "utf8");
+    const occurrences = content.split(oldText).length - 1;
+    if (occurrences === 0) {
+      return "Error: old_text not found in file";
+    }
+    if (occurrences > 1) {
+      return `Error: old_text found ${occurrences} times (ambiguous edit)`;
+    }
+
+    const updated = content.replace(oldText, newText);
+    writeFileSync(resolved, updated, "utf8");
+    return `Successfully edited ${path}`;
+  } catch (err) {
+    return `Error: Failed to edit file: ${String(err)}`;
+  }
+}
+```
+
+## Best Practices
+
+<AccordionGroup>
+  <Accordion title="Use edit_file for targeted changes">
+    Prefer `edit_file` over `write_file` when making small modifications. This preserves file history and reduces risk of data loss.
+    
+    ```json
+    // Good: Targeted edit
+    {
+      "path": "package.json",
+      "old_text": "\"version\": \"1.0.0\"",
+      "new_text": "\"version\": \"1.1.0\""
+    }
+    ```
+  </Accordion>
+  
+  <Accordion title="Include enough context in old_text">
+    Make `old_text` unique to avoid ambiguity errors. Include surrounding context if needed.
+    
+    ```json
+    // Bad: Ambiguous
+    {
+      "old_text": "const x = 1;"
+    }
+    
+    // Good: Unique context
+    {
+      "old_text": "// Config\nconst x = 1;"
+    }
+    ```
+  </Accordion>
+  
+  <Accordion title="Handle errors gracefully">
+    Always check for `"Error: "` prefix in results:
+    
+    ```typescript
+    const result = await executeVoiceTool("read_file", args, workspace);
+    if (result.startsWith("Error: ")) {
+      console.error("Tool failed:", result);
+      return;
+    }
+    // Use result...
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Related Tools
+
+<CardGroup cols={2}>
+  <Card title="Bash" icon="terminal" href="/api/voice-tools/bash">
+    Execute shell commands for complex file operations
+  </Card>
+  
+  <Card title="Search" icon="magnifying-glass" href="/api/voice-tools/search">
+    Find files before reading or editing them
+  </Card>
+</CardGroup>

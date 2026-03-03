@@ -1,0 +1,518 @@
+---
+title: Troubleshooting
+description: Common issues and solutions for Rubber Duck, including daemon problems, microphone permissions, and hanging commands.
+---
+
+This guide covers common issues you might encounter with Rubber Duck and how to resolve them.
+
+## Daemon Issues
+
+### Duck Commands Hanging
+
+If `duck` commands hang or don't respond:
+
+<Steps>
+  <Step title="Check daemon status">
+    Run the diagnostic command:
+    
+    ```bash
+    duck doctor
+    ```
+    
+    This checks:
+    - Daemon reachability
+    - Pi binary installation
+    - API key configuration
+    - Socket connection
+  </Step>
+
+  <Step title="Restart the daemon">
+    Kill and restart the daemon:
+    
+    ```bash
+    pkill -f duck-daemon
+    duck
+    ```
+    
+    The daemon will automatically restart when you run any `duck` command.
+  </Step>
+
+  <Step title="Check the daemon log">
+    View the daemon log for errors:
+    
+    ```bash
+    cat ~/Library/Application\ Support/RubberDuck/duck-daemon.log
+    ```
+    
+    Look for error messages indicating what went wrong.
+  </Step>
+</Steps>
+
+### Daemon Not Responding
+
+If the daemon won't start or immediately crashes:
+
+<Accordion title="Socket file conflicts">
+  Check if the socket file exists but isn't responding:
+  
+  ```bash
+  ls -l ~/Library/Application\ Support/RubberDuck/duck.sock
+  ```
+  
+  If present but daemon isn't running:
+  
+  ```bash
+  rm ~/Library/Application\ Support/RubberDuck/duck.sock
+  pkill -f duck-daemon
+  duck
+  ```
+</Accordion>
+
+<Accordion title="PID file stale">
+  The PID file might be stale from a previous crash:
+  
+  ```bash
+  rm ~/Library/Application\ Support/RubberDuck/duck-daemon.pid
+  duck
+  ```
+</Accordion>
+
+<Accordion title="Corrupted metadata">
+  If metadata.json is corrupted, rename it to reset:
+  
+  ```bash
+  mv ~/Library/Application\ Support/RubberDuck/metadata.json ~/Library/Application\ Support/RubberDuck/metadata.json.backup
+  duck
+  ```
+  
+  **Warning**: This will lose your session list. Sessions files are preserved in `pi-sessions/`.
+</Accordion>
+
+## Microphone Permissions
+
+### Voice Not Activating
+
+If pressing `Option+D` doesn't start recording:
+
+<Steps>
+  <Step title="Check microphone permission">
+    Open Settings → Permissions and verify microphone access is granted.
+  </Step>
+
+  <Step title="Grant permission">
+    If permission is denied:
+    
+    1. Click "Open Settings" next to Microphone
+    2. Find Rubber Duck in the list
+    3. Enable microphone access
+    4. Restart Rubber Duck
+  </Step>
+
+  <Step title="Verify the hotkey">
+    Settings → General → Activate
+    
+    Ensure the hotkey is set (default: `Option+D`) and not conflicting with another app.
+  </Step>
+</Steps>
+
+### Menu Bar Icon Hidden
+
+If the Rubber Duck menu bar icon disappears:
+
+Press `Option+Shift+D` to open Settings directly. This works even when the icon isn't visible.
+
+To restore the icon:
+1. Quit Rubber Duck completely
+2. Check System Settings → Control Center → Menu Bar Only
+3. Relaunch Rubber Duck
+
+## Pi Binary Issues
+
+### Pi Not Found
+
+If `duck doctor` shows "Pi not found":
+
+<Steps>
+  <Step title="Install Pi globally">
+    ```bash
+    npm install -g @mariozechner/pi-coding-agent
+    ```
+  </Step>
+
+  <Step title="Install Pi in the CLI directory">
+    ```bash
+    cd /path/to/rubber-duck/cli
+    npm install
+    ```
+  </Step>
+
+  <Step title="Set the binary path manually">
+    ```bash
+    export RUBBER_DUCK_PI_BINARY="/custom/path/to/pi"
+    duck doctor
+    ```
+  </Step>
+</Steps>
+
+### Pi Version Mismatch
+
+If you see warnings about Pi version compatibility:
+
+```bash
+npm install -g @mariozechner/pi-coding-agent@latest
+```
+
+Then restart the daemon:
+
+```bash
+pkill -f duck-daemon
+duck
+```
+
+## API Key Issues
+
+### No API Key Configured
+
+If `duck doctor` shows "No API keys found":
+
+<Steps>
+  <Step title="For the Rubber Duck app (voice)">
+    1. Open Settings
+    2. Enter your OpenAI API key
+    3. Key is stored in macOS Keychain
+  </Step>
+
+  <Step title="For the duck CLI (text)">
+    Set the environment variable:
+    
+    ```bash
+    export OPENAI_API_KEY="sk-..."
+    duck doctor
+    ```
+    
+    Add to your shell profile to persist:
+    
+    ```bash
+    echo 'export OPENAI_API_KEY="sk-..."' >> ~/.zshrc
+    ```
+  </Step>
+</Steps>
+
+### API Key Not Saving
+
+If the API key doesn't persist in Settings:
+
+<Accordion title="Keychain access issues">
+  macOS may be blocking Keychain access. Check Console.app for errors:
+  
+  1. Open Console.app
+  2. Filter for "Rubber Duck"
+  3. Look for Keychain-related errors
+  
+  Try resetting Keychain permissions:
+  1. Open Keychain Access app
+  2. Search for "Rubber Duck"
+  3. Delete any existing entries
+  4. Re-enter API key in Settings
+</Accordion>
+
+## Session Issues
+
+### Sessions Not Appearing
+
+If `duck sessions` shows no sessions but you've created some:
+
+```bash
+# Check metadata file
+cat ~/Library/Application\ Support/RubberDuck/metadata.json
+
+# Check Pi session files exist
+ls ~/Library/Application\ Support/RubberDuck/pi-sessions/
+```
+
+If metadata.json is empty or corrupted:
+
+```bash
+pkill -f duck-daemon
+rm ~/Library/Application\ Support/RubberDuck/metadata.json
+duck
+```
+
+Sessions in `pi-sessions/` are preserved and can be reattached.
+
+### Session Stuck "Running"
+
+If a session shows as "running" but isn't responding:
+
+```bash
+# Abort the session
+duck abort session-name
+
+# Or restart the daemon
+pkill -f duck-daemon
+duck
+```
+
+### Can't Switch Sessions
+
+If `duck use session-name` fails:
+
+<Steps>
+  <Step title="Verify the session exists">
+    ```bash
+    duck sessions --all
+    ```
+  </Step>
+
+  <Step title="Use the full session ID">
+    Instead of the name, try the full session ID:
+    
+    ```bash
+    duck use abc123def456
+    ```
+  </Step>
+
+  <Step title="Check for session name conflicts">
+    If multiple sessions have similar names, use a more specific prefix or the full ID.
+  </Step>
+</Steps>
+
+## Performance Issues
+
+### Slow Response Times
+
+If the agent is responding slowly:
+
+<Accordion title="Check thinking level">
+  Higher thinking levels increase latency:
+  
+  ```bash
+  echo $RUBBER_DUCK_PI_THINKING
+  ```
+  
+  Default is `off` for speed. If set to `high` or `xhigh`, responses will be slower.
+  
+  To disable extended thinking:
+  
+  ```bash
+  unset RUBBER_DUCK_PI_THINKING
+  pkill -f duck-daemon
+  duck
+  ```
+</Accordion>
+
+<Accordion title="Check model selection">
+  Larger models may be slower but more capable:
+  
+  ```bash
+  duck doctor
+  ```
+  
+  Look at the `pi_model` line to see which model is in use.
+  
+  To use a faster model:
+  
+  ```bash
+  export RUBBER_DUCK_PI_MODEL="gpt-4o-mini"
+  pkill -f duck-daemon
+  duck
+  ```
+</Accordion>
+
+### High CPU Usage
+
+If Rubber Duck is using excessive CPU:
+
+<Steps>
+  <Step title="Check running sessions">
+    ```bash
+    duck sessions --all
+    ```
+    
+    Look for unexpectedly running sessions.
+  </Step>
+
+  <Step title="Abort background sessions">
+    ```bash
+    duck abort session-name
+    ```
+  </Step>
+
+  <Step title="Restart the daemon">
+    ```bash
+    pkill -f duck-daemon
+    duck
+    ```
+  </Step>
+</Steps>
+
+## Network Issues
+
+### Connection to OpenAI Failed
+
+If you see network errors:
+
+<Steps>
+  <Step title="Verify internet connection">
+    ```bash
+    curl -I https://api.openai.com
+    ```
+  </Step>
+
+  <Step title="Check API key validity">
+    Verify your key is active at [platform.openai.com/api-keys](https://platform.openai.com/api-keys)
+  </Step>
+
+  <Step title="Check for proxy settings">
+    If behind a corporate proxy, set:
+    
+    ```bash
+    export HTTPS_PROXY="http://proxy.example.com:8080"
+    ```
+  </Step>
+</Steps>
+
+## CLI Installation Issues
+
+### duck Command Not Found
+
+If `duck` isn't in your PATH:
+
+<Steps>
+  <Step title="Check installation location">
+    The CLI binary should be at:
+    
+    ```bash
+    ls /usr/local/bin/duck
+    ```
+    
+    Or if symlink failed:
+    
+    ```bash
+    ls ~/.local/bin/duck
+    ```
+  </Step>
+
+  <Step title="Add to PATH">
+    If in `~/.local/bin`, add to your shell profile:
+    
+    ```bash
+    echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc
+    source ~/.zshrc
+    ```
+  </Step>
+
+  <Step title="Reinstall via Settings">
+    Open Rubber Duck Settings → CLI Tools → Download/Reinstall
+  </Step>
+</Steps>
+
+### CLI Version Mismatch
+
+If the app and CLI versions don't match:
+
+1. Open Settings → CLI Tools
+2. Click "Update" if available
+3. Or click "Reinstall" to force download
+
+The CLI version should match the app version.
+
+## Voice Output Issues
+
+### No Voice Output
+
+If the agent responds in the terminal but doesn't speak:
+
+<Steps>
+  <Step title="Check system volume">
+    Ensure macOS volume isn't muted.
+  </Step>
+
+  <Step title="Check voice session">
+    Voice only plays for the active voice session (marked with ✓ in `duck sessions`).
+    
+    ```bash
+    duck sessions
+    duck use session-name
+    ```
+  </Step>
+
+  <Step title="Check Rubber Duck app is running">
+    ```bash
+    pgrep -x "Rubber Duck"
+    ```
+    
+    If not running, launch from Applications.
+  </Step>
+</Steps>
+
+### Voice Cuts Off Mid-Sentence
+
+If voice output stops unexpectedly:
+
+- Check if "Auto-abort on barge-in" is enabled
+- Ensure you're not triggering the microphone inadvertently
+- Check for background noise that might activate VAD
+
+## Getting More Help
+
+### Collecting Diagnostic Information
+
+<Steps>
+  <Step title="Run duck doctor">
+    ```bash
+    duck doctor
+    ```
+    
+    Save the output.
+  </Step>
+
+  <Step title="Check the daemon log">
+    ```bash
+    cat ~/Library/Application\ Support/RubberDuck/duck-daemon.log
+    ```
+  </Step>
+
+  <Step title="Check the app log">
+    In Settings, click "Show Logs" to view the Rubber Duck app log.
+  </Step>
+
+  <Step title="List sessions">
+    ```bash
+    duck sessions --all --json
+    ```
+  </Step>
+</Steps>
+
+### Reporting Issues
+
+File issues at [github.com/mblode/rubber-duck/issues](https://github.com/mblode/rubber-duck/issues)
+
+Include:
+- Output of `duck doctor`
+- Relevant log excerpts (review for sensitive data first)
+- macOS version
+- Steps to reproduce
+
+### Clean Reinstall
+
+For a complete reset:
+
+<Warning>
+  This will delete all sessions and configuration. Export any important sessions first.
+</Warning>
+
+```bash
+# Stop everything
+pkill -f duck-daemon
+pkill -x "Rubber Duck"
+
+# Remove all data
+rm -rf ~/Library/Application\ Support/RubberDuck/
+rm /usr/local/bin/duck
+
+# Reinstall
+brew reinstall --cask rubber-duck
+```
+
+Launch Rubber Duck and set up your API key again.

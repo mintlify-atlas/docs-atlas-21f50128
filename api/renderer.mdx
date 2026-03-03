@@ -1,0 +1,274 @@
+---
+title: createRenderer()
+description: Factory function for creating event renderers that format Pi events for terminal or JSON output
+---
+
+`createRenderer()` creates an `EventRenderer` instance that formats and displays Pi agent events in the terminal.
+
+## Function Signature
+
+```typescript
+function createRenderer(options: RendererOptions): EventRenderer
+```
+
+<ParamField path="options" type="RendererOptions" required>
+  Configuration object:
+  
+  <ParamField path="json" type="boolean" required>
+    If `true`, output raw NDJSON events. If `false`, use the pretty text renderer.
+  </ParamField>
+  
+  <ParamField path="color" type="boolean" required>
+    Enable ANSI color codes in text mode. Automatically disabled if `NO_COLOR` env var is set.
+  </ParamField>
+  
+  <ParamField path="showThinking" type="boolean" required>
+    Show extended thinking blocks in text mode (e.g., Claude's `<thinking>` tags)
+  </ParamField>
+  
+  <ParamField path="verbose" type="boolean" required>
+    Show additional debug output: turn markers, `setStatus` messages, etc.
+  </ParamField>
+</ParamField>
+
+<ResponseField name="EventRenderer">
+  An object with `render(event)` and `cleanup()` methods
+</ResponseField>
+
+## EventRenderer Interface
+
+```typescript
+interface EventRenderer {
+  render(event: RendererPiEvent): void | Promise<void>;
+  cleanup(): void;
+}
+```
+
+### render()
+
+Process and display a single event.
+
+<ParamField path="event" type="RendererPiEvent" required>
+  A Pi event or app history event. See [PiEvent types](/api/types#pievent).
+</ParamField>
+
+### cleanup()
+
+Flush any pending output and reset internal state.
+
+## Text Renderer
+
+The default renderer formats events with styled labels and streaming output.
+
+**Features:**
+
+- Streaming text deltas (assistant messages)
+- Tool execution with live output
+- Collapsible thinking blocks
+- Color-coded tags: `[tool]`, `[error]`, `[compact]`, etc.
+- Timing information for tool calls
+- `setStatus` debouncing (200ms)
+
+**Example Output:**
+
+```
+User: List all TypeScript files
+
+Duck: I'll search for TypeScript files in the current directory.
+
+[tool] glob_search pattern="**/*.ts"
+  src/index.ts
+  src/types.ts
+  src/client.ts
+  [42ms]
+
+Duck: Found 3 TypeScript files: index.ts, types.ts, and client.ts.
+```
+
+**Usage:**
+
+```typescript
+import { createRenderer } from '@rubberduck/cli';
+
+const renderer = createRenderer({
+  json: false,
+  color: true,
+  showThinking: false,
+  verbose: false
+});
+
+client.onEvent((event) => {
+  renderer.render(event.data);
+});
+
+process.on('SIGINT', () => {
+  renderer.cleanup();
+  process.exit(0);
+});
+```
+
+## JSON Renderer
+
+Outputs one JSON object per line (NDJSON). Useful for programmatic consumption or debugging.
+
+**Example Output:**
+
+```json
+{"type":"message_start","message":{"role":"user","content":"List all TypeScript files"}}
+{"type":"message_update","assistantMessageEvent":{"type":"text_start"}}
+{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"I'll search"}}
+{"type":"tool_execution_start","toolName":"glob_search","args":{"pattern":"**/*.ts"}}
+```
+
+**Usage:**
+
+```typescript
+const renderer = createRenderer({
+  json: true,
+  color: false,    // Ignored in JSON mode
+  showThinking: false,  // Ignored in JSON mode
+  verbose: false   // Ignored in JSON mode
+});
+
+client.onEvent((event) => {
+  renderer.render(event.data);
+});
+```
+
+## Event Types
+
+The renderer handles these event categories:
+
+### Agent Lifecycle
+
+- `agent_start` — Agent begins processing
+- `agent_end` — Agent completes (shown in verbose mode)
+- `turn_start`, `turn_end` — Conversation turns
+
+### Messages
+
+- `message_start` — New message (user or assistant)
+- `message_update` — Streaming deltas:
+  - `text_start`, `text_delta`, `text_end`
+  - `thinking_start`, `thinking_delta`, `thinking_end` (requires `showThinking: true`)
+  - `toolcall_start`, `toolcall_delta`, `toolcall_end`
+- `message_end` — Message complete
+
+### Tool Execution
+
+- `tool_execution_start` — Tool called with arguments
+- `tool_execution_update` — Streaming tool output (e.g., bash stdout)
+- `tool_execution_end` — Tool finished with result/error
+
+### Auto-Compaction
+
+- `auto_compaction_start` — Context compaction begins
+- `auto_compaction_end` — Compaction result or error
+
+### Auto-Retry
+
+- `auto_retry_start` — API retry attempt
+- `auto_retry_end` — Final retry outcome
+
+### Errors
+
+- `extension_error` — Extension threw an error
+- `prompt_error` — User prompt failed
+
+### UI Requests
+
+- `extension_ui_request` — Agent requests user input:
+  - `setStatus` — Status message (verbose mode only)
+  - `notify` — Notification
+  - `confirm` — Yes/no prompt
+  - `select` — Choose from options
+  - `input` — Text input
+  - `editor` — Multi-line input
+
+### App History
+
+- `app_history_event` — Voice/GUI events:
+  - `user_audio`, `user_text` — User input
+  - `assistant_audio`, `assistant_text` — Assistant output
+  - `tool_call` — Voice tool execution
+
+## Options Examples
+
+### Minimal Output
+
+```typescript
+const renderer = createRenderer({
+  json: false,
+  color: false,
+  showThinking: false,
+  verbose: false
+});
+// Shows: user messages, assistant text, tool calls, errors
+```
+
+### Debug Mode
+
+```typescript
+const renderer = createRenderer({
+  json: false,
+  color: true,
+  showThinking: true,
+  verbose: true
+});
+// Shows: everything including thinking, status updates, turn markers
+```
+
+### JSON Logging
+
+```typescript
+const renderer = createRenderer({
+  json: true,
+  color: false,
+  showThinking: false,
+  verbose: false
+});
+// Outputs NDJSON for all events
+```
+
+## Full Example
+
+```typescript
+import { DaemonClient, createRenderer } from '@rubberduck/cli';
+
+async function followSession() {
+  const client = await DaemonClient.connect();
+  
+  const renderer = createRenderer({
+    json: false,
+    color: !process.env.NO_COLOR,
+    showThinking: process.argv.includes('--thinking'),
+    verbose: process.argv.includes('--verbose')
+  });
+  
+  client.onEvent((event) => {
+    renderer.render(event.data);
+  });
+  
+  await client.request('attach', { path: process.cwd() });
+  await client.request('follow', {});
+  
+  process.on('SIGINT', () => {
+    renderer.cleanup();
+    client.close();
+    process.exit(0);
+  });
+}
+
+followSession().catch((err) => {
+  console.error('Error:', err.message);
+  process.exit(1);
+});
+```
+
+## Implementation Notes
+
+- **Text renderer** tracks streaming state to avoid duplicate labels when events arrive out-of-order
+- **Tool output** is diffed incrementally to show only new lines in `tool_execution_update`
+- **Status messages** are debounced (200ms) to avoid flickering
+- **Color support** respects `NO_COLOR` environment variable
+- **Cleanup** is essential before exit to flush pending output and avoid truncated lines

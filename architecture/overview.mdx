@@ -1,0 +1,285 @@
+---
+title: Architecture Overview
+description: High-level system architecture of Rubber Duck
+---
+
+Rubber Duck is a voice-first coding companion for macOS that combines three primary components into a cohesive system:
+
+1. **Rubber Duck.app** — macOS menu bar application for voice I/O and session management
+2. **CLI daemon** — local Node.js daemon managing Pi processes, IPC, and persistence
+3. **duck CLI** — terminal client for workspace attachment, event streaming, and text prompts
+
+The design ensures voice stays the primary interface while the terminal provides a complete audit trail of all operations.
+
+## System Diagram
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    Rubber Duck.app (macOS)                  │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────────┐  │
+│  │ Menu Bar UI  │  │ Audio I/O    │  │ Voice Session    │  │
+│  │ - Status     │  │ - Mic (VAD)  │  │ Coordinator      │  │
+│  │ - Settings   │  │ - Speaker    │  │ - OpenAI RT API  │  │
+│  │ - Hotkeys    │  │ - TTS/STT    │  │ - Tool Execution │  │
+│  └──────────────┘  └──────────────┘  └──────────────────┘  │
+│                          │                      │            │
+│                          │                      │            │
+│                    ┌─────▼──────────────────────▼──────┐    │
+│                    │   DaemonSocketClient (Swift)      │    │
+│                    │   Network.framework NWConnection  │    │
+│                    └───────────────┬───────────────────┘    │
+└────────────────────────────────────┼────────────────────────┘
+                                     │ Unix Socket
+                                     │ NDJSON IPC
+┌────────────────────────────────────▼────────────────────────┐
+│                  CLI Daemon (Node.js)                        │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────────┐  │
+│  │ Socket Server│  │ Request      │  │ Metadata Store   │  │
+│  │ (Unix Socket)│  │ Handler      │  │ (metadata.json)  │  │
+│  └──────┬───────┘  └──────┬───────┘  └──────────────────┘  │
+│         │                 │                                  │
+│  ┌──────▼─────────────────▼───────┐  ┌──────────────────┐  │
+│  │      Event Bus (pub/sub)       │  │ Health Monitor   │  │
+│  └──────┬─────────────────────────┘  └──────────────────┘  │
+│         │                                                    │
+│  ┌──────▼──────────────────────────────────────────┐       │
+│  │   Pi Process Manager                            │       │
+│  │   - Session ID → PiProcess map                  │       │
+│  │   - Spawn/kill lifecycle                        │       │
+│  │   - Voice tool execution (6 tools)              │       │
+│  └──────┬──────────────────────────────────────────┘       │
+│         │                                                    │
+│    ┌────▼────┐  ┌─────────┐  ┌─────────┐                   │
+│    │ Pi RPC  │  │ Pi RPC  │  │ Pi RPC  │  (one per session)│
+│    │ Session │  │ Session │  │ Session │                   │
+│    └─────────┘  └─────────┘  └─────────┘                   │
+└───────────────────────────────────────────────────────────┬─┘
+                                                             │
+                ┌────────────────────────────────────────────┘
+                │ Unix Socket (NDJSON)
+                │
+┌───────────────▼──────────────────────────────────────────┐
+│                   duck CLI (Node.js)                      │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────────┐│
+│  │ DaemonClient │  │ Commands     │  │ Renderer         ││
+│  │ (NDJSON)     │  │ - attach     │  │ - Text (default) ││
+│  │              │  │ - say        │  │ - JSON           ││
+│  │              │  │ - sessions   │  │ - UI Handler     ││
+│  │              │  │ - doctor     │  │   (@clack)       ││
+│  └──────────────┘  └──────────────┘  └──────────────────┘│
+└───────────────────────────────────────────────────────────┘
+```
+
+## Component Responsibilities
+
+### Rubber Duck.app (Swift + SwiftUI)
+
+**Purpose**: Voice interface and user experience
+
+- Captures audio with Voice Activity Detection (VAD)
+- Streams audio to OpenAI Realtime API for STT/TTS
+- Manages voice session lifecycle (connecting, listening, speaking, thinking)
+- Executes barge-in (immediate TTS interruption on user speech)
+- Displays menu bar status and settings UI
+- Routes voice tool calls to daemon via Unix socket
+- Syncs workspace/session state from CLI metadata
+
+**Key Classes**:
+- `VoiceSessionCoordinator`: Main state machine orchestrating audio, API, and daemon
+- `DaemonSocketClient`: Unix socket client for IPC with daemon
+- `AudioManager`: Microphone capture with VAD
+- `AudioPlaybackManager`: TTS playback with barge-in support
+- `RealtimeClient`: WebSocket client for OpenAI Realtime API
+
+### CLI Daemon (Node.js)
+
+**Purpose**: Process coordination, session management, and IPC hub
+
+- Spawns and manages Pi RPC subprocesses (one per session)
+- Provides Unix socket server for app and CLI clients
+- Publishes Pi events to subscribed clients via event bus
+- Persists workspace and session metadata
+- Executes voice tool calls (read, write, edit, bash, grep, find)
+- Auto-starts on first CLI invocation
+
+**Key Modules**:
+- `daemon/main.ts`: Entry point, lifecycle management
+- `daemon/pi-process-manager.ts`: Session → PiProcess map
+- `daemon/pi-process.ts`: Pi RPC subprocess wrapper
+- `daemon/socket-server.ts`: Unix socket NDJSON server
+- `daemon/event-bus.ts`: Pub/sub for session events
+- `daemon/metadata-store.ts`: Atomic JSON persistence
+- `daemon/voice-tools.ts`: Tool execution for voice calls
+
+### duck CLI (Node.js)
+
+**Purpose**: Workspace attachment, event streaming, text interaction
+
+- Attaches workspaces and resumes sessions
+- Streams Pi events to terminal with formatted output
+- Sends text prompts via `duck say`
+- Handles extension UI requests with `@clack/prompts`
+- Auto-starts daemon if not running
+
+**Key Modules**:
+- `commands/default.ts`: `duck [path]` attach and follow
+- `commands/say.ts`: Send prompt and wait for completion
+- `renderer/text-renderer.ts`: Terminal output formatting
+- `renderer/ui-handler.ts`: Interactive prompts
+- `client.ts`: Daemon socket client
+
+## Data Flow Patterns
+
+### Voice Turn (User Speaks)
+
+```
+1. User presses hotkey (Option+D)
+2. App: VoiceSessionCoordinator.connectAndListen()
+   → Connects to OpenAI Realtime API
+   → Starts audio streaming (AudioManager)
+   → Registers with daemon (voice_connect)
+3. User speaks
+   → AudioManager captures PCM16 24kHz mono
+   → Sent to Realtime API via WebSocket
+4. Realtime API: speech_started event
+   → VoiceSessionCoordinator: setState(.listening)
+5. Realtime API: input_audio_transcription.done
+   → VoiceSessionCoordinator: appends to conversation history
+6. Realtime API: response.created
+   → Assistant begins generating response
+```
+
+### Tool Execution (Voice → Daemon → Pi)
+
+```
+1. Realtime API: response.function_call_arguments.done
+   → VoiceSessionCoordinator.enqueueFunctionCall()
+2. App: executePendingFunctionCallsViaDaemon()
+   → DaemonSocketClient.request("voice_tool_call", {...})
+3. Daemon: voice-tools.ts handles request
+   → Executes tool (e.g., read_file, bash) in workspace
+   → Returns result
+4. App: sends tool result to Realtime API
+   → realtimeClient.sendToolResult(callId, output)
+5. Realtime API generates next response with tool context
+```
+
+### CLI Attachment (Terminal → Daemon → Pi)
+
+```
+1. User runs: duck ~/my-repo
+2. CLI: ensureDaemon() auto-starts daemon if needed
+3. CLI: client.request("attach", { workspacePath, ... })
+4. Daemon: MetadataStore.upsertWorkspace()
+   → Persists workspace to metadata.json
+5. Daemon: PiProcessManager.spawn()
+   → Spawns Pi in RPC mode with workspace as cwd
+   → Pi loads session history from JSONL
+6. Daemon: EventBus.subscribe(clientId, sessionId)
+   → Forwards all Pi events to CLI
+7. CLI: Renderer streams events to terminal
+   → User sees live transcript, tool calls, diffs
+```
+
+## Communication Protocols
+
+### Daemon IPC (Unix Socket + NDJSON)
+
+**Socket Path**:
+- Primary: `~/Library/Application Support/RubberDuck/daemon.sock`
+- Fallback (if path too long): `$TMPDIR/rubber-duck-<hash>.sock`
+
+**Message Types**:
+
+```typescript
+// Request (client → daemon)
+{ id: string, method: string, params: {...} }
+
+// Response (daemon → client)
+{ id: string, ok: boolean, data?: {...}, error?: string }
+
+// Event (daemon → subscribed clients, no id)
+{ event: string, sessionId: string, data: {...} }
+```
+
+**Methods**:
+- `ping`: Health check
+- `attach`: Create/resume workspace session
+- `follow`: Subscribe to session events
+- `say`: Send text prompt to session
+- `voice_connect`: Register voice app connection
+- `voice_tool_call`: Execute tool from voice session
+- `voice_state`: Query current voice session state
+- `sessions`: List all sessions
+- `doctor`: Run health diagnostics
+
+### Pi RPC (stdin/stdout + NDJSON)
+
+The daemon spawns Pi with `--mode rpc`, establishing a bidirectional JSON protocol:
+
+```typescript
+// Command (daemon → Pi stdin)
+{ id: string, type: "prompt" | "abort" | "get_state", ...params }
+
+// Response (Pi stdout → daemon)
+{ id: string, command: string, success: boolean, data?: {...}, error?: string }
+
+// Event (Pi stdout → daemon, no id)
+{ type: "message_update" | "tool_execution_start" | ..., ...data }
+```
+
+**Key Events**:
+- `message_update`: Streaming text/tool call deltas
+- `tool_execution_start/update/end`: Tool output streaming
+- `extension_ui_request`: Interactive prompt needed
+- `agent_end`: Turn complete
+
+## Session Model
+
+**Workspace**: A directory (typically a git repo) with a unique ID based on path hash.
+
+**Session**: One Pi conversation history (JSONL file) bound to a workspace. Multiple sessions can exist per workspace.
+
+**Active Voice Session**: The session currently receiving voice input from the app. Only one session is active for voice at a time.
+
+**Concurrent Sessions**: Multiple Pi processes can run simultaneously. Background sessions stream events to CLI but don't speak.
+
+**Persistence**:
+- Workspace/session metadata: `~/Library/Application Support/RubberDuck/metadata.json`
+- Session history: `~/Library/Application Support/RubberDuck/pi-sessions/<sessionId>.jsonl` (Pi-managed)
+- Voice conversation history: `~/Library/Application Support/RubberDuck/pi-sessions/<sessionId>.jsonl` (app-managed, separate from Pi session)
+
+## File Locations
+
+```
+~/Library/Application Support/RubberDuck/
+├── daemon.sock              # Unix socket (or in $TMPDIR if too long)
+├── duck-daemon.pid          # Daemon process ID
+├── duck-daemon.log          # Daemon lifecycle log
+├── metadata.json            # Workspace/session metadata (atomic writes)
+├── config.json              # Daemon configuration
+├── pi-sessions/             # Pi session JSONL files
+│   ├── <sessionId>.jsonl
+│   └── ...
+└── duck                     # CLI binary (downloaded on first launch)
+```
+
+## Runtime Dependencies
+
+- **macOS app**: Swift 5, SwiftUI, macOS 15.2+ SDK, Network.framework
+- **CLI daemon**: Node.js 22+, Pi CLI (`pi` binary in PATH)
+- **Pi**: Installed separately, requires OpenAI/Anthropic API keys
+
+## Security Model
+
+- Unix socket restricted to user (filesystem permissions)
+- Daemon binds to localhost/Unix socket only (no network exposure)
+- Tool execution confined to workspace directory (cwd)
+- API keys stored in macOS Keychain (app) and environment variables (daemon/Pi)
+- No telemetry or external services beyond LLM APIs
+
+## Next Steps
+
+- [Voice Pipeline](/architecture/voice-pipeline) — Audio capture, VAD, STT, TTS, OpenAI Realtime API
+- [Pi Integration](/architecture/pi-integration) — RPC mode, tool execution, event streaming
+- [Session Model](/architecture/session-model) — Workspaces, sessions, concurrency, persistence

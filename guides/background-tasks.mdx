@@ -1,0 +1,212 @@
+---
+title: Background Tasks
+description: Run tasks in background sessions, manage concurrent operations, and configure notifications for completed work.
+---
+
+Rubber Duck can run multiple sessions concurrently, allowing you to start a long-running task in one session while continuing to work in another.
+
+## How Background Sessions Work
+
+By default, voice output is tied to the **active voice session**. When other sessions produce responses:
+
+- Output streams to terminals following that session
+- No voice is spoken (unless configured otherwise)
+- Notifications can alert you when work completes
+
+<Warning>
+  Background sessions continue running until they complete or are explicitly aborted. Always monitor resource usage when running multiple concurrent sessions.
+</Warning>
+
+## Starting Background Work
+
+<Steps>
+  <Step title="Create a session for the background task">
+    ```bash
+    duck new --name test-suite
+    ```
+  </Step>
+
+  <Step title="Start the task">
+    ```bash
+    duck use test-suite
+    duck say "Run the full test suite and report any failures"
+    ```
+  </Step>
+
+  <Step title="Switch to another session">
+    ```bash
+    duck use main-work
+    ```
+    
+    The test-suite session continues running in the background.
+  </Step>
+
+  <Step title="Monitor progress">
+    Open a separate terminal to follow the background session:
+    
+    ```bash
+    duck follow test-suite
+    ```
+  </Step>
+</Steps>
+
+## Managing Concurrent Sessions
+
+### Checking Running Sessions
+
+View all active sessions:
+
+```bash
+duck sessions
+```
+
+The output shows which sessions are currently running:
+
+```
+SESSION         WORKSPACE        STATUS      LAST ACTIVE
+test-suite      ~/projects/app   running     2m ago
+main-work ✓     ~/projects/app   running     30s ago
+refactor        ~/other/repo     stopped     1h ago
+```
+
+The `✓` indicates the active voice session.
+
+### Aborting Running Tasks
+
+To stop a background task:
+
+```bash
+duck abort test-suite
+```
+
+This sends Pi's `abort` command, which:
+- Stops the current agent turn
+- Interrupts any running bash commands
+- Preserves the conversation history up to that point
+
+## Notification Settings
+
+Configure how Rubber Duck notifies you about background work:
+
+<Accordion title="Background Completion Notifications">
+  When a background session completes:
+  
+  - **Default**: Silent completion (no notification)
+  - **Configurable**: Enable notifications in Settings for non-voice sessions
+  
+  The menu bar icon updates to show session status changes.
+</Accordion>
+
+<Accordion title="Voice Output for Background Sessions">
+  By default, only the active voice session speaks responses. 
+  
+  You can enable "Background sessions speak" in Settings to hear all session output, but this is **not recommended** as it can be confusing when multiple sessions talk simultaneously.
+</Accordion>
+
+## Example: Concurrent Development Workflow
+
+Here's a practical example of using background tasks:
+
+<Steps>
+  <Step title="Start a long-running analysis">
+    ```bash
+    duck new --name security-audit
+    duck say "Scan the entire codebase for security issues and generate a report"
+    ```
+  </Step>
+
+  <Step title="Continue normal work">
+    ```bash
+    duck use main
+    ```
+    
+    Press `Option+D`: "Fix the login page styling bug"
+    
+    You can continue working normally while the security audit runs.
+  </Step>
+
+  <Step title="Check on background progress">
+    In a separate terminal:
+    
+    ```bash
+    duck follow security-audit
+    ```
+    
+    Watch the live stream of file scans and findings.
+  </Step>
+
+  <Step title="Review results when complete">
+    ```bash
+    duck use security-audit
+    ```
+    
+    Press `Option+D`: "Summarize the security findings"
+  </Step>
+</Steps>
+
+## Barge-In Behavior
+
+The **Auto-abort on barge-in** setting (enabled by default) controls what happens when you interrupt the assistant:
+
+### With Auto-Abort Enabled (Default)
+
+When you start speaking while the assistant is responding:
+
+1. TTS stops immediately
+2. The current agent run is aborted
+3. Your new speech becomes a fresh prompt
+4. Any running bash commands are interrupted
+
+### With Auto-Abort Disabled
+
+When you interrupt:
+
+1. TTS stops immediately
+2. Your speech is sent as a **steering message**
+3. The current tool completes
+4. Remaining planned tools are skipped
+5. The assistant responds to your steering input
+
+Toggle this in Settings under "Voice Agent".
+
+## Resource Management
+
+Each running session:
+- Spawns a separate Pi subprocess
+- Maintains its own memory and context
+- Can execute tools independently
+
+<Warning>
+  Running many concurrent sessions can consume significant system resources. Monitor your system performance and close sessions you're not actively using.
+</Warning>
+
+### Stopping Sessions
+
+Sessions automatically stop after a period of inactivity, but you can manually stop them:
+
+```bash
+# Abort the current operation
+duck abort session-name
+
+# Kill the daemon (stops all sessions)
+pkill -f duck-daemon
+```
+
+## Session Lifecycle Events
+
+When following a session, you'll see events indicating:
+
+- Session started/resumed
+- Agent turn started
+- Tool executions (read, write, bash, etc.)
+- Agent turn completed
+- Session switched (when voice changes to another session)
+
+## Best Practices
+
+- **Monitor background sessions** in separate terminal windows
+- **Use descriptive session names** to identify background tasks
+- **Abort long-running tasks** that are no longer needed
+- **Check `duck sessions`** regularly to see what's running
+- **Limit concurrent sessions** to what your system can handle comfortably
+- **Review background work** by switching to that session and asking for a summary

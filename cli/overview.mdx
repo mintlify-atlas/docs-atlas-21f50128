@@ -1,0 +1,106 @@
+---
+title: CLI Overview
+description: Install and use the Rubber Duck CLI to interact with your voice coding companion from the terminal
+---
+
+The Rubber Duck CLI (`duck`) is a voice-first coding companion that runs as a local daemon. It manages Pi RPC sessions per workspace and streams events over a Unix domain socket.
+
+## Installation
+
+Install globally via npm:
+
+```bash
+npm install -g rubber-duck
+```
+
+Or run without installing:
+
+```bash
+npx rubber-duck --help
+```
+
+### macOS App Integration
+
+If you're using the Rubber Duck menu bar app on macOS, the CLI binary is automatically installed on first launch:
+
+- Downloaded from GitHub Releases to `~/Library/Application Support/RubberDuck/duck`
+- Symlinked to `/usr/local/bin/duck`
+- Auto-updated when the app version changes
+
+## Basic Usage
+
+The CLI provides four core commands:
+
+```bash
+duck [path]        # Attach to workspace and stream live events
+duck say <message> # Send a prompt to the active session
+duck sessions      # List all sessions with status
+duck doctor        # Check system health and dependencies
+```
+
+## Quick Start
+
+Attach to your current workspace:
+
+```bash
+duck .
+```
+
+In another terminal, send commands:
+
+```bash
+duck say "run tests and summarize failures only"
+duck say "refactor the authentication logic"
+```
+
+List active sessions:
+
+```bash
+duck sessions --all
+```
+
+Check system health:
+
+```bash
+duck doctor
+```
+
+## Requirements
+
+- **Node.js**: Version 22 or higher
+- **Pi binary**: Resolved in this order:
+  1. `RUBBER_DUCK_PI_BINARY` environment variable
+  2. Local `cli/node_modules/.bin/pi`
+  3. `pi` from system `PATH`
+
+## Environment Variables
+
+<ParamField path="RUBBER_DUCK_PI_MODEL" type="string" default="gpt-4o-mini">
+  Override the default AI model for Pi sessions. Examples: `gpt-4o`, `claude-3-5-sonnet-20241022`
+</ParamField>
+
+<ParamField path="RUBBER_DUCK_PI_THINKING" type="string" default="off">
+  Control thinking verbosity level. Options: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`
+</ParamField>
+
+<ParamField path="RUBBER_DUCK_PI_BINARY" type="string">
+  Explicit path to the Pi binary executable
+</ParamField>
+
+<ParamField path="NO_COLOR" type="boolean">
+  Disable colored terminal output when set to any value
+</ParamField>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Command Reference" icon="terminal" href="/cli/commands">
+    Complete reference for all CLI commands and options
+  </Card>
+  <Card title="Output Format" icon="stream" href="/cli/output-format">
+    Learn about event streaming and JSON mode
+  </Card>
+  <Card title="Daemon Architecture" icon="server" href="/cli/daemon">
+    Understand the daemon process and runtime files
+  </Card>
+</CardGroup>

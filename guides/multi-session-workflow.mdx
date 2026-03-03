@@ -1,0 +1,173 @@
+---
+title: Multi-Session Workflow
+description: Learn how to work with multiple sessions, create and switch between them, and follow multiple terminals simultaneously.
+---
+
+Rubber Duck supports running multiple sessions concurrently, allowing you to work on different tasks or codebases in parallel while maintaining separate conversation contexts.
+
+## Understanding Sessions
+
+A **session** is a single Pi conversation bound to a workspace (directory). Each session:
+
+- Has its own conversation history stored as a JSONL file
+- Can run independently and concurrently with other sessions
+- Can be named for easy identification
+- Maintains its own context and tool execution state
+
+## Creating Sessions
+
+<Steps>
+  <Step title="Create a named session">
+    Use the `duck new` command with an optional name:
+    
+    ```bash
+    duck new --name debug-tests
+    duck new --name refactor-module
+    ```
+    
+    Sessions are automatically created for the current workspace when you run `duck` without an existing session.
+  </Step>
+
+  <Step title="List all sessions">
+    View all sessions with their status:
+    
+    ```bash
+    duck sessions
+    ```
+    
+    Use `--all` to see sessions across all workspaces:
+    
+    ```bash
+    duck sessions --all
+    ```
+    
+    Output shows session name, workspace path, running status, and last active time.
+  </Step>
+</Steps>
+
+## Switching Between Sessions
+
+The **active voice session** determines where your voice commands are sent. Switch sessions using:
+
+```bash
+duck use debug-tests
+```
+
+You can also switch sessions from the Rubber Duck menu bar popover by clicking on a session in the list.
+
+<Warning>
+  Switching sessions does **not** kill other running sessions. They continue executing in the background.
+</Warning>
+
+## Following Multiple Sessions
+
+You can monitor multiple sessions simultaneously by opening separate terminal windows.
+
+<Steps>
+  <Step title="Open multiple terminals">
+    Launch separate terminal windows or tabs for each session you want to monitor.
+  </Step>
+
+  <Step title="Follow different sessions">
+    In Terminal A:
+    ```bash
+    duck follow debug-tests
+    ```
+    
+    In Terminal B:
+    ```bash
+    duck follow refactor-module
+    ```
+    
+    Each terminal will stream events only for its subscribed session.
+  </Step>
+
+  <Step title="Send commands to specific sessions">
+    You can send messages to any session regardless of which is active:
+    
+    ```bash
+    duck say "run the test suite" --session refactor-module
+    ```
+  </Step>
+</Steps>
+
+## Session States
+
+Sessions can be in one of these states:
+
+- **Running**: The Pi subprocess is active and can accept commands
+- **Stopped**: No active Pi process, but conversation history is preserved
+- **Active** (voice): This session receives voice commands (only one at a time)
+
+## Example Workflow
+
+Here's a common multi-session workflow:
+
+<Steps>
+  <Step title="Set up parallel work streams">
+    ```bash
+    cd ~/projects/myapp
+    duck new --name bug-fix
+    duck new --name add-feature
+    ```
+  </Step>
+
+  <Step title="Monitor both sessions">
+    Terminal 1:
+    ```bash
+    duck follow bug-fix
+    ```
+    
+    Terminal 2:
+    ```bash
+    duck follow add-feature
+    ```
+  </Step>
+
+  <Step title="Work with voice">
+    ```bash
+    # Switch voice to bug-fix session
+    duck use bug-fix
+    ```
+    
+    Press `Option+D` and speak: "Find the authentication error in the logs"
+    
+    The bug-fix terminal shows the live stream.
+  </Step>
+
+  <Step title="Switch contexts">
+    ```bash
+    # Switch voice to feature session
+    duck use add-feature
+    ```
+    
+    Press `Option+D` and speak: "Add a new user settings page"
+    
+    The add-feature terminal shows the new work.
+  </Step>
+</Steps>
+
+## Session Storage
+
+All session files are stored in:
+
+```
+~/Library/Application Support/RubberDuck/pi-sessions/
+```
+
+Each session is a JSONL file containing the full conversation tree with branching support.
+
+<Accordion title="Advanced: Using Global Pi Sessions">
+  By default, Rubber Duck uses a dedicated session directory to avoid interfering with your existing Pi workflows. 
+  
+  If you want to share sessions between Rubber Duck and Pi's normal CLI, you can enable "Use global Pi sessions" in the advanced settings. This uses Pi's standard session location instead.
+  
+  **Note**: This is an advanced feature and may cause session conflicts if you're using Pi separately.
+</Accordion>
+
+## Best Practices
+
+- **Name your sessions descriptively** so you can easily identify them later
+- **Use separate terminals** to monitor long-running sessions
+- **Close unused sessions** to free resources (sessions auto-stop when idle)
+- **Check session status** with `duck sessions` before starting new work

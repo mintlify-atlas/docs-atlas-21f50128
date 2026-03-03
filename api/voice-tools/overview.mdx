@@ -1,0 +1,274 @@
+---
+title: 'Voice Tools Overview'
+description: 'How voice tools work and execute in the daemon'
+---
+
+## Overview
+
+Voice tools allow the Rubber Duck voice agent to interact with your workspace through a secure, sandboxed environment. When you use voice commands, the OpenAI Realtime API makes tool calls that are executed by the daemon through the `voice-tools.ts` implementation.
+
+## Architecture
+
+Voice tools are executed in Node.js by the daemon process, not in the Swift app. This architecture provides:
+
+- **Consistent behavior**: Same tool implementation for both voice and CLI workflows
+- **Path containment**: All file operations are validated against workspace boundaries
+- **Safe mode support**: Optional restrictions on destructive operations
+- **Output limits**: Protection against excessive data
+
+## Execution Flow
+
+<Steps>
+  <Step title="Voice command captured">
+    The macOS app captures your voice through the microphone and streams audio to OpenAI's Realtime API at 24 kHz PCM16 mono.
+  </Step>
+  
+  <Step title="Tool call triggered">
+    OpenAI's model determines a tool is needed and emits a function call with parameters.
+  </Step>
+  
+  <Step title="Daemon receives request">
+    The Swift app forwards the tool call to the daemon via Unix socket using the `voice_tool_call` method:
+    
+    ```json
+    {
+      "id": "req-123",
+      "method": "voice_tool_call",
+      "params": {
+        "callId": "call_abc",
+        "toolName": "read_file",
+        "arguments": "{\"path\":\"src/main.ts\"}"
+      }
+    }
+    ```
+  </Step>
+  
+  <Step title="Tool execution">
+    The daemon executes the tool in `voice-tools.ts` with workspace path validation and returns the result.
+  </Step>
+  
+  <Step title="Result returned">
+    The result is sent back through the daemon to the Swift app, which forwards it to OpenAI to continue the conversation.
+  </Step>
+</Steps>
+
+## Available Tools
+
+Rubber Duck provides seven voice tools:
+
+<CardGroup cols={2}>
+  <Card title="read_file" icon="file" href="/api/voice-tools/file-operations#read_file">
+    Read file contents from the workspace
+  </Card>
+  
+  <Card title="write_file" icon="pen-to-square" href="/api/voice-tools/file-operations#write_file">
+    Create or overwrite files
+  </Card>
+  
+  <Card title="edit_file" icon="pencil" href="/api/voice-tools/file-operations#edit_file">
+    Make targeted edits using find-and-replace
+  </Card>
+  
+  <Card title="bash" icon="terminal" href="/api/voice-tools/bash">
+    Execute shell commands with streaming output
+  </Card>
+  
+  <Card title="grep_search" icon="magnifying-glass" href="/api/voice-tools/search#grep_search">
+    Search file contents using patterns
+  </Card>
+  
+  <Card title="find_files" icon="folder-tree" href="/api/voice-tools/search#find_files">
+    Find files by glob pattern
+  </Card>
+  
+  <Card title="web_search" icon="globe">
+    Search the web using Exa API (requires API key)
+  </Card>
+</CardGroup>
+
+## Security Features
+
+### Path Containment
+
+All file operations validate that paths remain within the workspace root:
+
+```typescript
+async function resolvePath(
+  path: string,
+  workspaceRoot: string
+): Promise<string | null> {
+  const candidate = path.startsWith("/") ? path : join(workspaceRoot, path);
+  const canonicalized = await canonicalizeForContainment(candidate);
+  const candidateReal = canonicalized ?? resolve(candidate);
+
+  if (!isWithinDirectory(candidateReal, workspaceRoot)) {
+    return null; // Path escapes workspace
+  }
+  return candidateReal;
+}
+```
+
+Attempts to access files outside the workspace return an error:
+
+```
+Error: Path escapes workspace root
+```
+
+### Safe Mode
+
+Safe mode restricts which tools and commands can be executed:
+
+- **Disabled tools**: `write_file`, `edit_file`
+- **Allowed bash commands**: Only read-only operations like `git`, `grep`, `ls`, `cat`, test commands
+
+To enable safe mode, set the `safeMode` parameter when calling `executeVoiceTool()`:
+
+```typescript
+const result = await executeVoiceTool(
+  toolName,
+  argsJson,
+  workspacePath,
+  true // safeMode enabled
+);
+```
+
+### Output Limits
+
+Tools enforce output size limits to prevent memory issues:
+
+<ParamField path="MAX_OUTPUT_BYTES" type="number" default="102400">
+  Maximum bytes for bash and grep output (100 KB)
+</ParamField>
+
+<ParamField path="MAX_FILE_BYTES" type="number" default="1048576">
+  Maximum file size for read operations (1 MB)
+</ParamField>
+
+<ParamField path="MAX_FIND_RESULTS" type="number" default="200">
+  Maximum number of files returned by find_files
+</ParamField>
+
+<ParamField path="BASH_TIMEOUT_MS" type="number" default="30000">
+  Bash command timeout (30 seconds)
+</ParamField>
+
+## Error Handling
+
+All tools return string results. Errors are prefixed with `"Error: "` for consistent parsing:
+
+```typescript
+// Success
+"Successfully wrote 1234 bytes to src/config.ts"
+
+// Error
+"Error: File not found at 'src/missing.ts'"
+"Error: Path escapes workspace root"
+"Error: write_file is disabled in safe mode"
+```
+
+## Implementation
+
+The main dispatcher in `voice-tools.ts` routes tool calls:
+
+```typescript
+export async function executeVoiceTool(
+  toolName: string,
+  argsJson: string,
+  workspacePath: string,
+  safeMode = false
+): Promise<string> {
+  let parsedArgs: unknown;
+  try {
+    parsedArgs = JSON.parse(argsJson);
+  } catch {
+    return "Error: Invalid JSON arguments";
+  }
+
+  const args = normalizeArgs(toolName, parsedArgs);
+  if (!args) {
+    return "Error: Tool arguments must be a JSON object";
+  }
+
+  const workspaceRoot = await resolveWorkspaceRoot(workspacePath);
+  if (!workspaceRoot) {
+    return `Error: Workspace not accessible: '${workspacePath}'`;
+  }
+
+  switch (toolName) {
+    case "read_file":
+      return readFile(args, workspaceRoot);
+    case "write_file":
+      return writeFile(args, workspaceRoot, safeMode);
+    case "edit_file":
+      return editFile(args, workspaceRoot, safeMode);
+    case "bash":
+      return bash(args, workspaceRoot, safeMode);
+    case "grep_search":
+      return grepSearch(args, workspaceRoot);
+    case "find_files":
+      return findFiles(args, workspaceRoot);
+    case "web_search":
+      return webSearch(args);
+    default:
+      return `Error: Unknown tool '${toolName}'`;
+  }
+}
+```
+
+## Lenient Argument Parsing
+
+Voice models sometimes emit simplified formats. The implementation handles common cases:
+
+```typescript
+function normalizeArgs(
+  toolName: string,
+  parsedArgs: unknown
+): Record<string, unknown> | null {
+  if (isRecord(parsedArgs)) {
+    return parsedArgs;
+  }
+
+  // Accept single-string shortcuts
+  if (typeof parsedArgs === "string") {
+    switch (toolName) {
+      case "read_file":
+        return { path: parsedArgs };
+      case "bash":
+        return { command: parsedArgs };
+      case "grep_search":
+      case "find_files":
+        return { pattern: parsedArgs };
+      case "web_search":
+        return { query: parsedArgs };
+    }
+  }
+
+  return null;
+}
+```
+
+This allows the voice model to call:
+
+```json
+// Formal
+{"path": "src/main.ts"}
+
+// Shorthand (also accepted)
+"src/main.ts"
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="File Operations" icon="file" href="/api/voice-tools/file-operations">
+    Learn about read_file, write_file, and edit_file
+  </Card>
+  
+  <Card title="Bash Tool" icon="terminal" href="/api/voice-tools/bash">
+    Execute shell commands with streaming output
+  </Card>
+  
+  <Card title="Search Tools" icon="magnifying-glass" href="/api/voice-tools/search">
+    Search code with grep_search and find_files
+  </Card>
+</CardGroup>

@@ -1,0 +1,210 @@
+---
+title: Voice Interface
+description: Voice-first interaction with hotkey activation, push-to-talk, speech-to-text, text-to-speech, and barge-in interruptions
+---
+
+Rubber Duck is a voice-first coding companion. You talk out loud, it answers out loud, and you can interrupt at any time to steer the conversation.
+
+## Activation Hotkey
+
+The global hotkey **Option+D** (⌥D) activates the voice interface from anywhere on macOS.
+
+<Note>
+The first time you press Option+D, Rubber Duck will automatically attach to the workspace you have open in the terminal where you ran `duck [path]`.
+</Note>
+
+### Hotkey Behavior
+
+The activation hotkey is a **toggle**:
+
+- **Press when idle**: Connects to the OpenAI Realtime API, starts audio streaming, and begins listening for speech
+- **Press when active**: Immediately disconnects the session and stops all audio streaming
+
+The hotkey does not require push-to-talk. Once activated, the session uses **server-side voice activity detection (VAD)** to detect when you start and stop speaking.
+
+<Info>
+You can change the activation hotkey in **Settings > Hotkeys**. The default settings hotkey is **Option+Shift+D** (⌥⇧D).
+</Info>
+
+## Speech Detection
+
+Rubber Duck uses the OpenAI Realtime API's server-side VAD to detect speech:
+
+1. **Speech started**: The server detects you've begun speaking (Rubber Duck shows "Listening" state)
+2. **Speech stopped**: The server detects a natural pause (Rubber Duck transitions to "Thinking")
+3. **Assistant response**: The model processes your input and responds with audio and text
+
+<Tip>
+The server VAD is tuned for natural conversation. You don't need to pause artificially — just speak normally and let the model detect turn boundaries.
+</Tip>
+
+### Noise Gate
+
+Rubber Duck applies a client-side **noise gate** to prevent ambient noise from triggering false speech detection:
+
+- Quiet audio below `-46 dBFS` is replaced with silence
+- Without echo cancellation, the threshold is raised to `-38 dBFS` to reduce speaker bleed
+- A **hold time** of 250ms (or 350ms without AEC) keeps the gate open during natural inter-word pauses
+
+This is implemented in `AudioManager.swift:471-503`.
+
+## Audio Streaming
+
+Rubber Duck streams audio at **24 kHz PCM16 mono** to the OpenAI Realtime API. The capture path is:
+
+```
+Microphone → AVAudioInputNode → Noise Gate → Format Conversion → Base64 → WebSocket
+```
+
+The audio engine (`AudioManager.swift`) supports two modes:
+
+### Voice Processing Mode (Preferred)
+
+Enables **VoiceProcessingIO** on the AVAudioEngine input node, which provides:
+
+- **Acoustic Echo Cancellation (AEC)**: Hardware-level echo cancellation at the driver level
+- **Noise Suppression**: Additional background noise reduction
+- **AGC**: Automatic gain control for consistent input levels
+
+When VoiceProcessingIO is active, the microphone stays open during assistant playback, enabling instant barge-in detection.
+
+<Note>
+On some multi-channel devices (e.g., MacBook Pro with 9-channel mic array), Rubber Duck automatically downmixes to mono for compatibility with VoiceProcessingIO.
+</Note>
+
+### Standard Mode (Fallback)
+
+If VoiceProcessingIO fails to initialize (e.g., due to incompatible hardware or audio routing), Rubber Duck falls back to **standard audio mode**:
+
+- No hardware AEC
+- **Software AEC** is applied: the playback reference signal is subtracted from the captured microphone signal to cancel echo
+- **Input muting** during assistant playback (unmuted after audio drains) to prevent residual echo
+
+Software AEC uses a ring buffer (`PlaybackReferenceBuffer`) populated by the playback manager, with adaptive delay estimation and gain calibration.
+
+## Text-to-Speech
+
+Assistant responses are streamed as **audio deltas** from the OpenAI Realtime API and played through the system speaker.
+
+The playback path is:
+
+```
+WebSocket → Base64 Decode → PCM16 Buffer → AVAudioPlayerNode → AVAudioEngine output
+```
+
+Implemented in `AudioPlaybackManager.swift`.
+
+### Smart Truncation for Voice
+
+Rubber Duck filters assistant responses before speaking to avoid reading long code blocks or diffs verbatim:
+
+- **Short responses**: Spoken verbatim
+- **Responses with long code blocks**: A summary is spoken, and the assistant says "details are in the terminal"
+
+This keeps the voice conversation natural while preserving full detail in the CLI output.
+
+<Tip>
+The terminal always shows the full assistant response with syntax highlighting and diffs, even if the spoken version is summarized.
+</Tip>
+
+## Barge-In (Interruptions)
+
+Rubber Duck supports **immediate barge-in**: you can interrupt the assistant at any time while it's speaking.
+
+### How Barge-In Works
+
+1. **Speech detection during playback**: If the server detects `speech_started` while the assistant is speaking, Rubber Duck schedules a **confirmation delay** (default: 350ms)
+2. **Confirmation window**: If speech continues for the full delay, barge-in is confirmed
+3. **Stop playback immediately**: `AVAudioPlayerNode.stop()` is called to halt audio output
+4. **Truncate response**: Rubber Duck sends `conversation.item.truncate` to the server with the exact playback position (in milliseconds)
+5. **Resume listening**: The session transitions back to "Listening" state
+
+Implemented in `VoiceSessionCoordinator.swift:286-389`.
+
+<Warning>
+The barge-in confirmation delay prevents false positives from echo (your speakers being picked up by your microphone). On devices without hardware AEC, this delay is increased to 550ms.
+</Warning>
+
+### Abort vs. Steer Modes
+
+Rubber Duck offers two interruption modes (configured in **Settings**):
+
+#### Auto-Abort (Default)
+
+When you interrupt, Rubber Duck:
+
+1. Stops playback and truncates the assistant's response at the exact playback position
+2. The server discards any planned tool calls that haven't started yet
+3. Your new speech is treated as a **fresh user turn**
+
+This is best for **course corrections** ("wait, that's wrong") or **topic changes** ("actually, let's do something else").
+
+#### Steer Mode (Auto-Abort Disabled)
+
+When you interrupt in steer mode, Rubber Duck:
+
+1. Stops playback immediately
+2. Sends your new speech as a **steering message** to the server
+3. The server delivers the steer message **after the current tool completes**
+4. Any remaining planned tools are skipped
+
+This is best for **refinements** ("add error handling to that function") where you want the current operation to finish before applying your feedback.
+
+<Info>
+The CLI always prints a line indicating whether the run was **aborted** or **steered** so you have full visibility into what happened.
+</Info>
+
+### Echo Cancellation and Barge-In
+
+Barge-in reliability depends on echo cancellation:
+
+| Mode | Microphone During Playback | Confirmation Delay | Echo Risk |
+|------|---------------------------|-------------------|----------|
+| **VoiceProcessingIO (Hardware AEC)** | Always open | 350ms (default) | Very low |
+| **Software AEC** | Always open | 450ms minimum | Low |
+| **No AEC** | Muted, then unmuted after playback | 550ms minimum | Medium (echo during unmute transition) |
+
+The confirmation delay is automatically tuned based on the active echo cancellation mode.
+
+## Session State Visualization
+
+The menu bar icon and overlay reflect the current voice session state:
+
+| State | Icon | Overlay |
+|-------|------|--------|
+| **Idle** | Default | Hidden |
+| **Connecting** | Animated | "Thinking..." |
+| **Listening** | Microphone | "Listening" |
+| **Thinking** | Brain | "Thinking..." |
+| **Speaking** | Speaker | "Speaking" |
+| **Tool Running** | Gear | Tool name (e.g., "bash") |
+
+Implemented in `VoiceSessionCoordinator.swift:6-13` and `OverlayPresenter.swift`.
+
+## Microphone Permissions
+
+Rubber Duck requires **microphone access** to capture audio. On first launch, macOS will prompt for permission.
+
+If you deny permission or revoke it later:
+
+- The voice interface will not activate
+- `duck doctor` will show a warning
+- You can grant permission in **System Settings > Privacy & Security > Microphone**
+
+<Tip>
+Rubber Duck provides a helper link in Settings to open the macOS microphone permissions pane directly.
+</Tip>
+
+## API Key Management
+
+Rubber Duck stores your OpenAI API key securely in the **macOS Keychain**. You can set or update the key in **Settings > API Keys**.
+
+<Warning>
+Without a valid API key, the voice interface will not connect. Rubber Duck will open Settings automatically if no key is found.
+</Warning>
+
+## Related
+
+- [Interruptions](/features/interruptions) - Deep dive into barge-in behavior and abort vs. steer modes
+- [Sessions](/features/sessions) - Session management and multi-workspace support
+- [CLI Commands](/features/cli-commands) - Using the `duck` CLI to attach workspaces and send messages

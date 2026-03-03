@@ -1,0 +1,88 @@
+---
+title: Introduction
+description: Voice coding agent for macOS. Hold a hotkey, speak to your codebase, hear answers back.
+---
+
+# Introduction
+
+Rubber Duck is a voice-first coding companion for macOS. Hold `Option+D` and speak — the agent reads your files, edits code, runs commands, and talks back, all streamed to your terminal via the `duck` CLI.
+
+Interrupt mid-sentence and it stops immediately. Nothing is hidden.
+
+## How it Works
+
+Rubber Duck combines a menu bar app with a terminal CLI to give you transparent, voice-driven coding assistance:
+
+1. **Hold the hotkey** (`Option+D`) and speak your request
+2. **Watch the terminal** as the agent searches files, runs commands, and proposes edits
+3. **Hear the response** spoken back to you while seeing full details in your terminal
+4. **Interrupt anytime** — speaking stops the agent immediately
+
+The terminal stays as your "glass box" where you can see the full transcript, tool calls, output, and diffs. Voice is the primary interface; the CLI is the primary audit trail.
+
+## Key Features
+
+<CardGroup cols={2}>
+  <Card title="Voice-First Interaction" icon="microphone">
+    Natural back-and-forth conversation about your codebase. Press and hold `Option+D`, speak, and get spoken responses with full terminal transparency.
+  </Card>
+  
+  <Card title="Instant Interruptions" icon="hand">
+    Interrupt mid-sentence and the agent stops immediately. Barge-in support with automatic abort or steering.
+  </Card>
+  
+  <Card title="Full Terminal Transparency" icon="terminal">
+    Every file read, command execution, and code edit is visible in your terminal. No hidden automation.
+  </Card>
+  
+  <Card title="Multi-Session Support" icon="layer-group">
+    Run multiple sessions concurrently across different repos. Follow different sessions in separate terminals while voice stays attached to one active session.
+  </Card>
+  
+  <Card title="Workspace Confinement" icon="folder-tree">
+    All operations are scoped to your attached workspace directory. File operations and bash commands stay within your repo boundaries.
+  </Card>
+  
+  <Card title="Powered by Pi CLI" icon="robot">
+    Built on Pi coding agent's RPC mode for robust session management, tool execution, and streaming output.
+  </Card>
+</CardGroup>
+
+## What You Can Do
+
+**Understand code**
+- "Where is the authentication flow defined?"
+- "How does the payment processing work?"
+- "Why is this test failing?"
+
+**Change code**
+- "Refactor this module to use async/await"
+- "Add error handling to the API routes"
+- "Fix the type errors in the user service"
+
+**Navigate and verify**
+- "Run the test suite and summarize failures"
+- "Show me recent git changes"
+- "Check if the build passes"
+
+## Two-Piece Architecture
+
+**Rubber Duck.app** — Menu bar UI with microphone/speaker, session manager, and local daemon that spawns Pi processes and routes events.
+
+**`duck` CLI** — Terminal client that attaches workspaces, streams live events, and provides simple session control. Never executes tools directly — it's a client of the app/daemon.
+
+## Get Started
+
+<CardGroup cols={3}>
+  <Card title="Installation" icon="download" href="/installation">
+    Install Rubber Duck on macOS 15.2+ using Homebrew or direct DMG download
+  </Card>
+  
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Get up and running in minutes with your first voice coding session
+  </Card>
+  
+  <Card title="CLI Reference" icon="terminal" href="/cli-reference">
+    Learn all available `duck` commands and options
+  </Card>
+</CardGroup>

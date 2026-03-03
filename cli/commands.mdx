@@ -1,0 +1,272 @@
+---
+title: Command Reference
+description: Complete reference for all Rubber Duck CLI commands with parameters and examples
+---
+
+## duck [path]
+
+Attach to a workspace and stream live events. If a session exists for the workspace, it resumes that session. Otherwise, it creates a new session.
+
+<ParamField path="path" type="string" default="current directory">
+  Workspace path to attach. Can be relative or absolute.
+</ParamField>
+
+### Usage
+
+```bash
+# Attach to current directory
+duck
+
+# Attach to specific path
+duck ~/projects/my-app
+duck ../other-workspace
+```
+
+### Behavior
+
+- Automatically starts the daemon if not running
+- Creates or resumes a workspace session
+- Streams both Pi daemon events and app voice history
+- Continues running until interrupted (Ctrl+C)
+
+### Examples
+
+```bash
+# Start working in the current workspace
+duck .
+
+# Attach to a different project
+duck ~/Documents/acme-project
+```
+
+## duck say
+
+Send a message to the active session and wait for the response.
+
+```bash
+duck say <message...>
+```
+
+<ParamField path="message" type="string" required>
+  The prompt to send to the AI assistant. Multiple words are joined with spaces.
+</ParamField>
+
+### Options
+
+<ParamField path="--json" type="boolean">
+  Output raw NDJSON events instead of formatted text
+</ParamField>
+
+<ParamField path="--session" type="string">
+  Target a specific session by ID, name, or unambiguous prefix (hidden option for advanced use)
+</ParamField>
+
+<ParamField path="--show-thinking" type="boolean">
+  Display model thinking blocks in output (hidden option for debugging)
+</ParamField>
+
+<ParamField path="--color" type="boolean">
+  Force color output even in non-TTY environments (hidden option)
+</ParamField>
+
+<ParamField path="--no-color" type="boolean">
+  Disable colored output (hidden option)
+</ParamField>
+
+### Usage
+
+```bash
+# Send a simple prompt
+duck say "list all files in the src directory"
+
+# Multi-word prompts are automatically joined
+duck say add unit tests for the auth module
+
+# Output raw JSON events
+duck say "run the linter" --json
+```
+
+### Behavior
+
+- Attaches to the active session or creates one if needed
+- Shows a "Thinking..." spinner while waiting for response
+- Streams the assistant's response in real-time
+- Automatically handles interactive UI requests (confirmations, selections)
+- Exits when the agent finishes responding
+- Times out after 10 minutes if no response
+
+### Exit Codes
+
+- `0`: Success (agent completed normally)
+- `1`: Error (failed to connect, send message, or prompt error)
+
+### Examples
+
+```bash
+# Code generation
+duck say "create a new React component for user profiles"
+
+# Code analysis
+duck say "explain what this function does" --session my-workspace
+
+# Refactoring
+duck say "extract this logic into a separate utility function"
+
+# Testing
+duck say "run tests and summarize failures only"
+
+# Get raw event stream for automation
+duck say "check for type errors" --json > output.ndjson
+```
+
+## duck sessions
+
+List all sessions with their status and workspace paths.
+
+```bash
+duck sessions [options]
+```
+
+### Options
+
+<ParamField path="--all" type="boolean">
+  Show sessions for all workspaces (not just the current one)
+</ParamField>
+
+<ParamField path="--json" type="boolean">
+  Output session data as JSON instead of a formatted table
+</ParamField>
+
+### Usage
+
+```bash
+# List sessions for current workspace
+duck sessions
+
+# List all sessions across all workspaces
+duck sessions --all
+
+# Get machine-readable output
+duck sessions --all --json
+```
+
+### Output Format
+
+Table columns:
+
+- **SESSION**: Session name (active session marked with ✓)
+- **WORKSPACE**: Workspace path (shortened with `~` for home directory)
+- **STATUS**: `running` (green) or `stopped` (dimmed)
+- **LAST ACTIVE**: Relative timestamp (e.g., "2 minutes ago")
+
+### JSON Output Schema
+
+```json
+[
+  {
+    "id": "session-abc123",
+    "name": "my-app",
+    "workspacePath": "/Users/alice/projects/my-app",
+    "isActive": true,
+    "isRunning": true,
+    "lastActiveAt": "2026-03-03T10:30:00.000Z"
+  }
+]
+```
+
+### Examples
+
+```bash
+# Quick status check
+$ duck sessions
+SESSION       WORKSPACE              STATUS     LAST ACTIVE
+my-app ✓     ~/projects/my-app      running    just now
+old-project   ~/archive/old-project  stopped    2 hours ago
+
+# Parse session data in scripts
+duck sessions --json | jq '.[] | select(.isRunning) | .name'
+```
+
+## duck doctor
+
+Check system health and dependencies. Runs diagnostics on both the CLI client and the daemon.
+
+```bash
+duck doctor
+```
+
+### Checks Performed
+
+**Client checks:**
+- Node.js version compatibility (requires v22+)
+- Pi binary availability and version
+- Environment variable configuration
+
+**Daemon checks** (if running):
+- Daemon process health
+- Socket connection status
+- Active session count
+- Pi subprocess status
+
+### Usage
+
+```bash
+duck doctor
+```
+
+### Output Format
+
+Each check shows:
+- **Name**: The component being checked
+- **Status**: ✓ (ok), ⚠ (warning), or ✗ (fail)
+- **Message**: Details or recommended actions
+
+### Exit Codes
+
+- `0`: All checks passed (or warnings only)
+- `1`: At least one check failed
+
+### Example Output
+
+```bash
+$ duck doctor
+◇ duck doctor
+│
+✓ node           v22.1.0
+✓ pi             found at /usr/local/bin/pi (v1.2.3)
+✓ daemon         running (PID 12345)
+✓ socket         connected to daemon.sock
+✓ sessions       2 active sessions
+│
+◆ All checks passed.
+```
+
+### Troubleshooting
+
+If `daemon` shows a warning:
+```
+⚠ daemon         Not running. Run `duck` to start.
+```
+
+Start the daemon by attaching to any workspace:
+```bash
+duck .
+```
+
+## Removed Commands
+
+The following legacy commands were removed and consolidated:
+
+- `duck follow` → Use `duck [path]` instead
+- `duck attach` → Use `duck [path]` instead
+- `duck new` → Sessions are created automatically
+- `duck use` → Switch by attaching with `duck [path]`
+- `duck abort` → Use Ctrl+C to interrupt
+- `duck export` → Not yet implemented
+
+If you run a removed command, you'll see:
+
+```bash
+$ duck follow
+⚠ `follow` was removed. Use `duck` to attach+stream and `duck say ...` to send prompts.
+```

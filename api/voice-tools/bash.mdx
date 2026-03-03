@@ -1,0 +1,388 @@
+---
+title: 'Bash Tool'
+description: 'Execute shell commands with streaming output and exit codes'
+---
+
+## Overview
+
+The `bash` tool executes shell commands in the workspace directory and returns combined stdout/stderr output with exit codes.
+
+<Warning>
+  In **safe mode**, only read-only commands are allowed: `git`, `grep`, `rg`, `find`, `ls`, `cat`, `head`, `tail`, `wc`, and test commands (`swift test`, `xcodebuild test`, `npm test`, `pytest`).
+</Warning>
+
+## Parameters
+
+<ParamField path="command" type="string" required>
+  Shell command to execute. Accepts alternative key: `cmd`. The command runs in the workspace root directory.
+</ParamField>
+
+## Returns
+
+<ResponseField name="result" type="string">
+  Combined stdout and stderr output, followed by exit code. Output is truncated at 100 KB.
+</ResponseField>
+
+## Behavior
+
+- **Working directory**: Commands run in the workspace root
+- **Shell selection**: Prefers `/bin/zsh`, falls back to `/bin/bash -lc`, then `sh -c`
+- **Timeout**: Commands are terminated after 30 seconds
+- **Output limit**: Results are truncated at 100 KB with a marker
+- **Exit code**: Always appended as `[Exit code: N]`
+
+## Examples
+
+<CodeGroup>
+```json List Files
+{
+  "command": "ls -la src/"
+}
+```
+
+```json Git Status
+{
+  "command": "git status --short"
+}
+```
+
+```json Run Tests
+{
+  "command": "npm test"
+}
+```
+
+```json Grep with Pipe
+{
+  "command": "grep -r 'TODO' src/ | head -5"
+}
+```
+</CodeGroup>
+
+### Success Response
+
+```text
+total 48
+drwxr-xr-x  6 user  staff   192 Mar  3 10:30 .
+drwxr-xr-x  8 user  staff   256 Mar  3 10:25 ..
+-rw-r--r--  1 user  staff  1024 Mar  3 10:30 config.ts
+-rw-r--r--  1 user  staff  2048 Mar  3 10:28 main.ts
+[Exit code: 0]
+```
+
+### Error Response
+
+```text
+ls: src/missing: No such file or directory
+[Exit code: 1]
+```
+
+### Timeout Response
+
+```text
+... partial output ...
+[Output truncated at 100KB]
+[Process timed out after 30s and was terminated]
+[Exit code: 143]
+```
+
+### Safe Mode Rejection
+
+```text
+Error: Command not allowed in safe mode
+```
+
+## Safe Mode Allowed Commands
+
+In safe mode, only these command prefixes are permitted:
+
+<AccordionGroup>
+  <Accordion title="Version Control" icon="git">
+    ```bash
+    git status
+    git log
+    git diff
+    git show
+    # Any git command is allowed
+    ```
+  </Accordion>
+  
+  <Accordion title="Search and Read" icon="magnifying-glass">
+    ```bash
+    grep -r "pattern" src/
+    rg "pattern" --type ts
+    find . -name "*.ts"
+    ls -la
+    cat file.txt
+    head -n 10 log.txt
+    tail -f app.log
+    wc -l *.ts
+    ```
+  </Accordion>
+  
+  <Accordion title="Testing" icon="flask">
+    ```bash
+    swift test
+    xcodebuild test -scheme MyApp
+    npm test
+    pytest tests/
+    ```
+  </Accordion>
+</AccordionGroup>
+
+Commands not matching these prefixes return:
+
+```text
+Error: Command not allowed in safe mode
+```
+
+## Implementation Details
+
+From `voice-tools.ts:375-454`:
+
+```typescript
+function bash(
+  args: Record<string, unknown>,
+  workspaceRoot: string,
+  safeMode: boolean
+): Promise<string> {
+  const command = extractStringArg(args, ["command", "cmd"]);
+  if (!command) {
+    return Promise.resolve("Error: Missing required parameter 'command'");
+  }
+
+  return new Promise((resolve) => {
+    let proc: ReturnType<typeof spawn>;
+
+    if (safeMode) {
+      let parsed: string[];
+      try {
+        parsed = parseCommandArgs(command);
+      } catch {
+        return resolve("Error: Invalid command syntax in safe mode");
+      }
+      const allowed = SAFE_MODE_ALLOWED_PREFIXES.some(
+        (prefix) =>
+          parsed.slice(0, prefix.length).join(" ") === prefix.join(" ")
+      );
+      if (!allowed) {
+        return resolve("Error: Command not allowed in safe mode");
+      }
+      proc = spawn(parsed[0], parsed.slice(1), { cwd: workspaceRoot });
+    } else if (existsSync("/bin/zsh")) {
+      proc = spawn("/bin/zsh", ["-c", command], { cwd: workspaceRoot });
+    } else if (existsSync("/bin/bash")) {
+      proc = spawn("/bin/bash", ["-lc", command], { cwd: workspaceRoot });
+    } else {
+      proc = spawn("sh", ["-c", command], { cwd: workspaceRoot });
+    }
+
+    const stdoutChunks: Buffer[] = [];
+    const stderrChunks: Buffer[] = [];
+
+    proc.stdout?.on("data", (chunk: Buffer) => stdoutChunks.push(chunk));
+    proc.stderr?.on("data", (chunk: Buffer) => stderrChunks.push(chunk));
+
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      proc.kill("SIGTERM");
+    }, BASH_TIMEOUT_MS);
+
+    proc.on("close", (code) => {
+      clearTimeout(timer);
+      const stdout = Buffer.concat(stdoutChunks).toString("utf8");
+      const stderr = Buffer.concat(stderrChunks).toString("utf8");
+
+      let output = "";
+      if (stdout) {
+        output += stdout;
+      }
+      if (stderr) {
+        output += (output ? "\n" : "") + stderr;
+      }
+
+      output = truncateOutput(output);
+      if (timedOut) {
+        output += "\n[Process timed out after 30s and was terminated]";
+      }
+      output += `\n[Exit code: ${code ?? "unknown"}]`;
+
+      resolve(output);
+    });
+
+    proc.on("error", (err) => {
+      clearTimeout(timer);
+      resolve(`Error: Failed to launch process: ${err.message}`);
+    });
+  });
+}
+```
+
+## Command Parsing in Safe Mode
+
+Safe mode parses commands into tokens to validate prefixes:
+
+```typescript
+function parseCommandArgs(command: string): string[] {
+  // Shell tokenizer handling quotes and escapes
+  // Returns array of arguments for prefix matching
+}
+```
+
+Example parsing:
+
+```typescript
+// Input
+"git status --short"
+
+// Parsed
+["git", "status", "--short"]
+
+// Matches allowed prefix
+SAFE_MODE_ALLOWED_PREFIXES.includes(["git"]) // true
+```
+
+## Use Cases
+
+<CardGroup cols={2}>
+  <Card title="Build and Test" icon="hammer">
+    ```bash
+    npm run build
+    npm test
+    tsc --noEmit
+    ```
+  </Card>
+  
+  <Card title="Git Operations" icon="git">
+    ```bash
+    git status
+    git log --oneline -10
+    git diff HEAD~1
+    ```
+  </Card>
+  
+  <Card title="File Analysis" icon="chart-line">
+    ```bash
+    wc -l src/**/*.ts
+    find . -name "*.test.ts" | wc -l
+    du -sh node_modules/
+    ```
+  </Card>
+  
+  <Card title="Process Management" icon="server">
+    ```bash
+    ps aux | grep node
+    lsof -i :3000
+    kill -9 1234
+    ```
+  </Card>
+</CardGroup>
+
+## Best Practices
+
+<AccordionGroup>
+  <Accordion title="Check exit codes" icon="check">
+    Always parse the exit code from output:
+    
+    ```typescript
+    const result = await executeVoiceTool("bash", args, workspace);
+    const exitCode = parseInt(result.match(/\[Exit code: (\d+)\]/)?.[1] ?? "-1");
+    
+    if (exitCode !== 0) {
+      console.error("Command failed with exit code", exitCode);
+    }
+    ```
+  </Accordion>
+  
+  <Accordion title="Handle long-running tasks" icon="clock">
+    Commands timeout after 30 seconds. For long tasks, consider:
+    
+    - Breaking into smaller steps
+    - Running in background with `nohup`
+    - Using separate monitoring commands
+    
+    ```bash
+    # Bad: May timeout
+    npm run build && npm run deploy
+    
+    # Good: Separate commands
+    npm run build
+    # Then check status, then:
+    npm run deploy
+    ```
+  </Accordion>
+  
+  <Accordion title="Quote paths with spaces" icon="quotes">
+    Use proper shell quoting for paths:
+    
+    ```json
+    {
+      "command": "cat \"path with spaces/file.txt\""
+    }
+    ```
+  </Accordion>
+  
+  <Accordion title="Combine stdout and stderr" icon="merge">
+    The tool already combines streams. Don't use `2>&1` redirection:
+    
+    ```bash
+    # Redundant
+    git status 2>&1
+    
+    # Sufficient
+    git status
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Timeout and Truncation
+
+### Timeout Behavior
+
+Commands exceeding 30 seconds receive `SIGTERM`:
+
+```text
+... partial output ...
+[Process timed out after 30s and was terminated]
+[Exit code: 143]
+```
+
+Exit code 143 = 128 + 15 (SIGTERM).
+
+### Output Truncation
+
+Output exceeding 100 KB is truncated:
+
+```text
+... first 100KB of output ...
+[Output truncated at 100KB]
+[Exit code: 0]
+```
+
+From `voice-tools.ts:224-233`:
+
+```typescript
+function truncateOutput(s: string): string {
+  const bytes = Buffer.byteLength(s, "utf8");
+  if (bytes <= MAX_OUTPUT_BYTES) {
+    return s;
+  }
+  return (
+    Buffer.from(s).subarray(0, MAX_OUTPUT_BYTES).toString("utf8") +
+    "\n[Output truncated at 100KB]"
+  );
+}
+```
+
+## Related Tools
+
+<CardGroup cols={2}>
+  <Card title="File Operations" icon="file" href="/api/voice-tools/file-operations">
+    Use dedicated tools for reading/writing files
+  </Card>
+  
+  <Card title="Search" icon="magnifying-glass" href="/api/voice-tools/search">
+    Prefer grep_search and find_files for code search
+  </Card>
+</CardGroup>

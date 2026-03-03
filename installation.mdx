@@ -1,0 +1,167 @@
+---
+title: Installation
+description: Install Rubber Duck on macOS using Homebrew or direct DMG download. Requires macOS 15.2+ and an OpenAI API key.
+---
+
+# Installation
+
+Rubber Duck requires macOS 15.2 or later and an [OpenAI API key](https://platform.openai.com/api-keys).
+
+## System Requirements
+
+<Note>
+  **macOS 15.2+** is required to run Rubber Duck
+</Note>
+
+- **Operating System**: macOS 15.2 or later
+- **API Key**: OpenAI API key for agent functionality
+- **Node.js**: Version 22 or later (for CLI development only — not required for normal use)
+
+## Installation Methods
+
+### Option 1: Homebrew (Recommended)
+
+Install via Homebrew for easy updates:
+
+<Steps>
+  <Step title="Add the tap">
+    ```bash
+    brew tap mblode/tap
+    ```
+  </Step>
+  
+  <Step title="Install Rubber Duck">
+    ```bash
+    brew install --cask rubber-duck
+    ```
+  </Step>
+  
+  <Step title="Launch the app">
+    The `duck` CLI will install automatically on first launch.
+  </Step>
+</Steps>
+
+### Option 2: Direct DMG Download
+
+Download and install manually:
+
+<Steps>
+  <Step title="Download the DMG">
+    [Download the latest DMG](https://github.com/mblode/rubber-duck/releases/latest) from GitHub Releases.
+  </Step>
+  
+  <Step title="Install the app">
+    Open the DMG and drag Rubber Duck to your Applications folder.
+  </Step>
+  
+  <Step title="Launch the app">
+    The `duck` CLI will install automatically on first launch.
+  </Step>
+</Steps>
+
+## CLI Installation
+
+<Note>
+  The `duck` CLI installs automatically when you first launch Rubber Duck.app. You don't need to install it separately.
+</Note>
+
+The CLI binary is downloaded to:
+```
+~/Library/Application Support/RubberDuck/duck
+```
+
+A symlink is created at:
+```
+/usr/local/bin/duck
+```
+
+Verify the installation:
+```bash
+duck --help
+```
+
+### CLI Version Matching
+
+When you update Rubber Duck.app, the CLI version is checked automatically. If there's a mismatch, the correct CLI version is downloaded from GitHub Releases.
+
+## API Key Setup
+
+<Steps>
+  <Step title="Get your OpenAI API key">
+    Sign up or log in at [OpenAI Platform](https://platform.openai.com/api-keys) and create an API key.
+  </Step>
+  
+  <Step title="Configure in Rubber Duck">
+    Open Rubber Duck Settings (click the menu bar icon or press `Option+Shift+D`) and enter your API key.
+    
+    Your API key is stored securely in the macOS Keychain.
+  </Step>
+</Steps>
+
+## Verify Installation
+
+Check that everything is working:
+
+```bash
+duck doctor
+```
+
+This command checks:
+- Rubber Duck daemon is reachable
+- Microphone permission is granted
+- Pi binary is installed and runnable
+- API providers are configured
+
+## Updating
+
+### Homebrew Installations
+
+Update to the latest version:
+
+```bash
+brew upgrade --cask rubber-duck
+```
+
+### Direct DMG Installations
+
+Check for updates in the app:
+
+1. Click the Rubber Duck menu bar icon
+2. Go to **Settings**
+3. Click **Check for Updates...**
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Menu bar icon is hidden">
+    Press `Option+Shift+D` to open Settings directly, even if the menu bar icon is not visible.
+  </Accordion>
+  
+  <Accordion title="duck commands are hanging">
+    Try these steps:
+    
+    1. Run `duck doctor` to check system health
+    2. Restart the daemon: `pkill -f duck-daemon`
+    3. Relaunch Rubber Duck.app
+  </Accordion>
+  
+  <Accordion title="Command not found: duck">
+    The CLI should install automatically on first launch. If it's missing:
+    
+    1. Make sure Rubber Duck.app is running
+    2. Check if the binary exists at `~/Library/Application Support/RubberDuck/duck`
+    3. Verify `/usr/local/bin` is in your `PATH`
+  </Accordion>
+  
+  <Accordion title="API key not working">
+    1. Verify your key is valid at [OpenAI Platform](https://platform.openai.com/api-keys)
+    2. Re-enter the key in Rubber Duck Settings
+    3. Make sure you have API credits available
+  </Accordion>
+</AccordionGroup>
+
+## Next Steps
+
+<Card title="Quickstart Guide" icon="rocket" href="/quickstart">
+  Learn how to attach a workspace and start your first voice coding session
+</Card>

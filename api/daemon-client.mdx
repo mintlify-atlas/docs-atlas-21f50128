@@ -1,0 +1,263 @@
+---
+title: DaemonClient
+description: Unix socket client for connecting to the Rubber Duck daemon and sending requests
+---
+
+`DaemonClient` provides a Node.js client for communicating with the Rubber Duck daemon over a Unix domain socket using NDJSON protocol.
+
+## Constructor
+
+The constructor is private. Use the static `connect()` method to create instances.
+
+## Static Methods
+
+### connect()
+
+Connect to the daemon and return a `DaemonClient` instance.
+
+```typescript
+static connect(
+  options?: number | { socketPath?: string; timeoutMs?: number }
+): Promise<DaemonClient>
+```
+
+<ParamField path="options" type="number | object">
+  Connection options. If a number, treated as `timeoutMs`. If an object:
+  
+  <ParamField path="socketPath" type="string">
+    Custom Unix socket path. Defaults to `~/Library/Application Support/RubberDuck/daemon.sock`
+  </ParamField>
+  
+  <ParamField path="timeoutMs" type="number" default="5000">
+    Connection timeout in milliseconds
+  </ParamField>
+</ParamField>
+
+<ResponseField name="Promise<DaemonClient>">
+  Resolves with a connected client instance, or rejects on timeout/error
+</ResponseField>
+
+**Example:**
+
+```typescript
+import { DaemonClient } from '@rubberduck/cli';
+
+// Connect with default timeout (5s)
+const client = await DaemonClient.connect();
+
+// Connect with custom timeout
+const client = await DaemonClient.connect(10000);
+
+// Connect with custom socket path
+const client = await DaemonClient.connect({
+  socketPath: '/tmp/custom.sock',
+  timeoutMs: 3000
+});
+```
+
+## Instance Methods
+
+### request()
+
+Send a typed request to the daemon and await the response.
+
+```typescript
+request<M extends DaemonRequest["method"]>(
+  method: M,
+  params: DaemonRequestMap[M],
+  timeoutMs = 30_000
+): Promise<DaemonResponse>
+```
+
+<ParamField path="method" type="DaemonMethod" required>
+  Request method: `attach`, `follow`, `unfollow`, `say`, `sessions`, `abort`, `doctor`, `get_state`, `ping`, `extension_ui_response`, `voice_connect`, `voice_tool_call`, `voice_state`
+</ParamField>
+
+<ParamField path="params" type="DaemonRequestMap[M]" required>
+  Type-safe parameters corresponding to the method. See [Types](/api/types#daemonrequestmap) for details.
+</ParamField>
+
+<ParamField path="timeoutMs" type="number" default="30000">
+  Request timeout in milliseconds
+</ParamField>
+
+<ResponseField name="Promise<DaemonResponse>">
+  Response with `{ id, ok, data?, error? }`
+</ResponseField>
+
+**Example:**
+
+```typescript
+// Ping the daemon
+const pong = await client.request('ping', {});
+
+// Attach to a workspace
+const result = await client.request('attach', {
+  path: '/Users/dev/my-project'
+});
+
+// Send a message
+const response = await client.request('say', {
+  message: 'List all files',
+  sessionId: 'abc123'
+});
+
+// Get session list
+const sessions = await client.request('sessions', {
+  workspaceId: 'xyz'
+});
+```
+
+### onEvent()
+
+Register a handler for daemon events (pushed asynchronously).
+
+```typescript
+onEvent(handler: (event: DaemonEvent) => void): void
+```
+
+<ParamField path="handler" type="(event: DaemonEvent) => void" required>
+  Callback invoked when the daemon pushes an event. Receives events like `{ event, sessionId, data }`
+</ParamField>
+
+**Example:**
+
+```typescript
+client.onEvent((event) => {
+  console.log(`[${event.sessionId}] ${event.event}`, event.data);
+  
+  if (event.data.type === 'message_update') {
+    // Handle streaming message delta
+  }
+});
+```
+
+### removeEventHandler()
+
+Unregister a previously registered event handler.
+
+```typescript
+removeEventHandler(handler: (event: DaemonEvent) => void): void
+```
+
+<ParamField path="handler" type="(event: DaemonEvent) => void" required>
+  The exact handler function reference to remove
+</ParamField>
+
+**Example:**
+
+```typescript
+const handler = (event) => console.log(event);
+client.onEvent(handler);
+
+// Later...
+client.removeEventHandler(handler);
+```
+
+### isConnected()
+
+Check if the client is currently connected to the daemon.
+
+```typescript
+isConnected(): boolean
+```
+
+**Example:**
+
+```typescript
+if (client.isConnected()) {
+  await client.request('ping', {});
+}
+```
+
+### close()
+
+Close the connection and reject all pending requests.
+
+```typescript
+close(): void
+```
+
+**Example:**
+
+```typescript
+try {
+  await client.request('say', { message: 'Hello' });
+} finally {
+  client.close();
+}
+```
+
+## Event Handling
+
+Events are pushed from the daemon asynchronously and do not correspond to specific requests. Common event types:
+
+- `agent_start`, `agent_end` — Agent lifecycle
+- `message_start`, `message_update`, `message_end` — Streaming assistant messages
+- `tool_execution_start`, `tool_execution_update`, `tool_execution_end` — Tool calls
+- `extension_ui_request` — UI prompts (e.g., confirm, input)
+
+See [PiEvent types](/api/types#pievent) for the full event schema.
+
+## Error Handling
+
+- `connect()` rejects if the daemon is not running or connection times out
+- `request()` rejects if the request times out or the socket disconnects
+- `request()` resolves with `{ ok: false, error }` for application-level errors
+
+**Example:**
+
+```typescript
+try {
+  const client = await DaemonClient.connect();
+  const response = await client.request('say', { message: 'test' });
+  
+  if (!response.ok) {
+    console.error('Request failed:', response.error);
+  }
+} catch (err) {
+  console.error('Connection or timeout error:', err);
+}
+```
+
+## Full Example
+
+```typescript
+import { DaemonClient } from '@rubberduck/cli';
+
+async function main() {
+  const client = await DaemonClient.connect();
+  
+  // Subscribe to events
+  client.onEvent((event) => {
+    if (event.data.type === 'message_update') {
+      const delta = event.data.assistantMessageEvent;
+      if (delta.type === 'text_delta' && delta.delta) {
+        process.stdout.write(delta.delta);
+      }
+    }
+  });
+  
+  // Attach to workspace
+  await client.request('attach', {
+    path: process.cwd()
+  });
+  
+  // Follow the session
+  const followResponse = await client.request('follow', {});
+  const sessionId = followResponse.data?.sessionId as string;
+  
+  // Send a message
+  await client.request('say', {
+    sessionId,
+    message: 'What files are in this directory?'
+  });
+  
+  // Wait for agent to finish...
+  await new Promise(resolve => setTimeout(resolve, 5000));
+  
+  client.close();
+}
+
+main().catch(console.error);
+```

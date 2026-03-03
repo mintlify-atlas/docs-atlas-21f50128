@@ -1,0 +1,471 @@
+---
+title: Voice Pipeline
+description: Audio capture, VAD, STT, TTS, and OpenAI Realtime API integration
+---
+
+The voice pipeline is the core of Rubber Duck's conversational interface. It handles audio I/O, voice activity detection, speech-to-text, text-to-speech, and barge-in behavior through the OpenAI Realtime API.
+
+## Pipeline Overview
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                   User speaks (microphone)                      │
+└────────────────────────────────┬────────────────────────────────┘
+                                 │
+                                 ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  AudioManager (Swift)                                           │
+│  - AVAudioEngine with VoiceProcessingIO                         │
+│  - Voice Activity Detection (VAD)                               │
+│  - PCM16 24kHz mono capture                                     │
+│  - Optional software echo cancellation                          │
+└────────────────────────────────┬────────────────────────────────┘
+                                 │ Base64 chunks (every 100ms)
+                                 ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  RealtimeClient (Swift WebSocket)                               │
+│  - Sends: input_audio_buffer.append                             │
+│  - Receives: speech_started, speech_stopped, transcription      │
+│               response.audio.delta, function_call               │
+└────────────────────────────────┬────────────────────────────────┘
+                                 │ OpenAI Realtime API (WebSocket)
+                                 │ wss://api.openai.com/v1/realtime
+                                 ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  OpenAI Realtime API                                            │
+│  - Server VAD (turn detection)                                  │
+│  - Streaming STT (input_audio_transcription)                    │
+│  - GPT-4o Realtime response generation                          │
+│  - Streaming TTS (output_audio.delta)                           │
+│  - Function call support                                        │
+└────────────────────────────────┬────────────────────────────────┘
+                                 │ Audio deltas (base64 PCM16)
+                                 ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  AudioPlaybackManager (Swift)                                   │
+│  - AVAudioEngine playback node                                  │
+│  - PCM16 24kHz mono decoding                                    │
+│  - Immediate stop on barge-in                                   │
+│  - Playback progress tracking for truncation                    │
+└────────────────────────────────┬────────────────────────────────┘
+                                 │
+                                 ▼
+┌─────────────────────────────────────────────────────────────────┐
+│               Speaker output (TTS playback)                     │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+## Audio Capture (AudioManager)
+
+### Configuration
+
+**Format**:
+- Sample rate: 24,000 Hz (OpenAI Realtime API requirement)
+- Format: PCM16 (16-bit linear PCM)
+- Channels: Mono
+- Encoding: Base64 for WebSocket transport
+
+**Hardware Setup** (`VoiceSessionCoordinator.swift:546-575`):
+```swift
+audioManager.startStreaming(
+    onChunk: { [weak self] base64Chunk in
+        // Send to Realtime API every ~100ms
+        self?.realtimeClient.sendAudio(base64Chunk: base64Chunk)
+    },
+    onError: { error in
+        // Handle mic permission or hardware failures
+    }
+)
+```
+
+### Echo Cancellation
+
+Rubber Duck supports three echo cancellation modes:
+
+1. **Hardware AEC (VoiceProcessingIO)**: Best quality, enabled by default on supported devices
+   - Real-time echo cancellation in hardware
+   - Allows mic to stay open during TTS playback for instant barge-in
+   - Detected via `audioManager.isEchoCancellationActive`
+
+2. **Software AEC**: Fallback for devices without hardware AEC
+   - Signal processing to reduce echo
+   - Requires longer confirmation delay before barge-in
+   - Detected via `audioManager.isSoftwareAECActive`
+
+3. **No AEC**: Fallback when neither is available
+   - Input is muted during TTS playback
+   - Unmuted after playback queue drains
+   - Longer speech suppression windows to avoid false triggers
+
+**Echo Suppression Logic** (`VoiceSessionCoordinator.swift:414-428`):
+```swift
+if state == .speaking {
+    // Hardware AEC: keep mic open for instant barge-in
+    audioManager.muteInput = audioManager.isEchoCancellationActive ? false : true
+} else if wasLeavingSpeaking {
+    // Software unmute after playback settles
+    let unmuteDelay: TimeInterval = isAnyAECActive ? 0.4 : 0.1
+    scheduleInputUnmute(afterSeconds: unmuteDelay, maxAdditionalDelay: 0.8)
+}
+```
+
+### Voice Activity Detection (VAD)
+
+Rubber Duck uses **server-side VAD** from the OpenAI Realtime API for turn detection:
+
+**Server Events**:
+- `input_audio_buffer.speech_started`: User started speaking
+- `input_audio_buffer.speech_stopped`: User stopped speaking (triggers response)
+
+**Client-Side Suppression** (`VoiceSessionCoordinator.swift:824-876`):
+To prevent echo-induced false positives, the app applies temporal guards:
+
+```swift
+// Ignore speech_started during input mute
+if audioManager.muteInput { return }
+
+// Ignore during VAD suppression window (post-playback)
+if now < vadSuppressedUntil { return }
+
+// Ignore shortly after assistant audio (without AEC)
+if !isAnyAECActive,
+   let lastAudioDelta = lastAssistantAudioDeltaAt,
+   now.timeIntervalSince(lastAudioDelta) < 0.45 {
+    return
+}
+```
+
+**Configuration** (via OpenAI Realtime session):
+- `turn_detection.type`: `server_vad`
+- `turn_detection.threshold`: Default (0.5)
+- `turn_detection.prefix_padding_ms`: 300
+- `turn_detection.silence_duration_ms`: 500
+
+## Speech-to-Text (STT)
+
+The OpenAI Realtime API provides **streaming transcription** as the user speaks.
+
+**Events**:
+- `conversation.item.input_audio_transcription.completed`: Final transcript of user speech
+- Transcript is automatically added to conversation context
+
+**Handling** (`VoiceSessionCoordinator.swift:1051-1053`):
+```swift
+func realtimeClient(_ client: any RealtimeClientProtocol, 
+                    didReceiveInputAudioTranscriptionDone text: String, 
+                    itemId: String?) {
+    appendUserTextIfNew(text, itemID: itemId)
+    // text is logged to conversation history and displayed in CLI
+}
+```
+
+**Voice-Friendly Transcript**:
+- Optimized for natural speech ("um", "uh" filtered by server)
+- Displayed in CLI as `[user]` event
+- Stored in conversation history for context
+
+## Text-to-Speech (TTS)
+
+Assistant responses are synthesized by the OpenAI Realtime API and streamed as audio chunks.
+
+**Events**:
+- `response.audio.delta`: Incremental audio chunks (base64 PCM16)
+- `response.audio.done`: Audio generation complete for this response
+
+**Voice Configuration** (`VoiceSessionCoordinator.swift:614-618`):
+```swift
+realtimeClient.voice = settings.voice  // "alloy", "echo", "shimmer"
+realtimeClient.model = settings.model  // "gpt-4o-realtime-preview-2024-12-17"
+```
+
+**Content Filtering**:
+The app speaks responses verbatim, but the system prompt encourages voice-friendly output:
+- Short, conversational responses
+- Avoids reading long code blocks (says "details are in the terminal" instead)
+- Summarizes tool output rather than speaking raw data
+
+**Playback** (`VoiceSessionCoordinator.swift:911-931`):
+```swift
+func realtimeClient(_ client: any RealtimeClientProtocol, 
+                    didReceiveAudioDelta base64Audio: String, 
+                    itemId: String?, 
+                    contentIndex: Int?) {
+    // Decode base64 → PCM16 samples
+    playbackManager.enqueueAudio(base64Chunk: base64Audio, 
+                                  itemId: itemId, 
+                                  contentIndex: contentIndex)
+    
+    setState(.speaking)
+    overlay.show(state: .speaking)
+}
+```
+
+## Barge-In (Interruption Handling)
+
+Barge-in allows the user to interrupt the assistant mid-sentence by speaking.
+
+### Detection Flow
+
+```
+1. Assistant is speaking (state: .speaking, TTS playback active)
+2. Server sends input_audio_buffer.speech_started
+3. Client applies temporal guards to avoid false positives:
+   - Was speech detected shortly after last audio delta? (echo)
+   - Is hardware AEC active? (reduces confirmation delay)
+4. If guards pass: scheduleConfirmedBargeIn() with delay
+5. If speech continues past delay: handleBargeIn()
+```
+
+### Barge-In Implementation (`VoiceSessionCoordinator.swift:286-389`)
+
+**Confirmation Delay**:
+- Hardware AEC: 0.35s (configurable, default)
+- Software AEC: 0.45s (minimum)
+- No AEC: 0.55s (minimum)
+
+Delays prevent echo-triggered false interruptions while keeping latency low.
+
+**Abort Behavior**:
+
+```swift
+if autoAbortOnBargeIn {  // Default: true
+    // Stop playback immediately
+    let snapshot = playbackManager.stopImmediatelySnapshot()
+    
+    // Truncate server response at playback position
+    if let itemId = currentAudioItemId, let contentIndex = currentAudioContentIndex {
+        let audioEndMs = snapshot.itemPlayedSamples * 1000 / sampleRate
+        realtimeClient.truncateResponse(itemId: itemId, 
+                                         contentIndex: contentIndex, 
+                                         audioEnd: audioEndMs)
+    }
+    
+    // Suppress stale audio deltas from interrupted response
+    suppressAssistantAudioUntilNextResponseCreated = true
+    
+    setState(.listening)
+}
+```
+
+**No-Abort Mode** (user preference `autoAbortOnBargeIn = false`):
+- Stops playback but does NOT truncate the response
+- Server continues processing current response
+- User speech is queued as next turn
+
+### Response Truncation
+
+When auto-abort is enabled, Rubber Duck sends a precise truncation command to the Realtime API:
+
+**Message** (`conversation.item.truncate`):
+```json
+{
+  "type": "conversation.item.truncate",
+  "item_id": "item_abc123",
+  "content_index": 0,
+  "audio_end_ms": 1234  // milliseconds of audio actually played
+}
+```
+
+This ensures the conversation history reflects only what the user heard, not the full generated response.
+
+## State Machine
+
+The `VoiceSessionCoordinator` manages voice session state:
+
+```
+┌──────────┐
+│   idle   │ ◄───────────────────────────────────────┐
+└────┬─────┘                                          │
+     │ hotkey press                                   │
+     │ connectAndListen()                             │
+     ▼                                                │
+┌──────────┐                                          │
+│connecting│  (WebSocket handshake)                  │
+└────┬─────┘                                          │
+     │ session.created                                │
+     ▼                                                │
+┌──────────┐                                          │
+│listening │ ◄──────────────────┐                    │
+└────┬─────┘                    │                    │
+     │ speech_stopped          │ response complete   │
+     ▼                          │                    │
+┌──────────┐                    │                    │
+│ thinking │ (model generating) │                    │
+└────┬─────┘                    │                    │
+     │ audio.delta received     │                    │
+     ▼                          │                    │
+┌──────────┐                    │                    │
+│ speaking │ ───────────────────┘                    │
+└────┬─────┘     (playback done)                     │
+     │ barge-in OR                                    │
+     │ function_call                                  │
+     ▼                                                │
+┌──────────┐                                          │
+│toolRunning│ (daemon executes tool)                 │
+└────┬─────┘                                          │
+     │ tool complete → request model response         │
+     └───────────────────────────────────────────────┐
+                                                      │
+     ┌────────────────────────────────────────────────┘
+     │ disconnectSession()
+     ▼
+  (back to idle)
+```
+
+**State Transitions** (`VoiceSessionCoordinator.swift:391-430`):
+- `idle → connecting`: User presses hotkey
+- `connecting → listening`: Session ready
+- `listening → thinking`: User stops speaking
+- `thinking → speaking`: Audio delta received
+- `speaking → listening`: Playback complete or barge-in
+- `* → toolRunning`: Function call detected
+- `toolRunning → thinking`: Tool complete, request next response
+
+## Tool Execution During Voice
+
+When the assistant requests a tool call (e.g., `read_file`), the voice pipeline pauses and delegates to the daemon:
+
+1. **Function Call Detected** (`VoiceSessionCoordinator.swift:1002-1016`):
+   ```swift
+   func realtimeClient(_ client: any RealtimeClientProtocol, 
+                       didReceiveTypedResponseDone response: RealtimeResponseDone) {
+       for call in response.functionCalls {
+           enqueueFunctionCallIfNeeded(callId: call.callId, 
+                                        name: call.name, 
+                                        arguments: call.arguments)
+       }
+       
+       if !pendingFunctionCalls.isEmpty {
+           Task { await executePendingFunctionCallsViaDaemon() }
+       }
+   }
+   ```
+
+2. **Daemon Execution** (`VoiceSessionCoordinator.swift:1077-1134`):
+   ```swift
+   setState(.toolRunning)
+   overlay.show(state: .toolRunning(call.name))
+   
+   let data = try await daemonClient.request(
+       method: "voice_tool_call",
+       params: [
+           "callId": call.callId,
+           "toolName": call.name,
+           "arguments": call.arguments,
+           "workspacePath": workspacePath.path
+       ]
+   )
+   
+   let result = data["result"] as? String ?? "Error: No result"
+   realtimeClient.sendToolResult(callId: call.callId, output: result)
+   ```
+
+3. **Resume Voice**:
+   ```swift
+   realtimeClient.requestModelResponse()  // Trigger next turn
+   setState(.thinking)
+   ```
+
+The CLI streams tool execution output in real-time, while the voice session briefly shows "Running: [tool_name]" in the menu bar.
+
+## Error Handling
+
+### Microphone Errors
+
+- **Permission Denied**: Display settings prompt, offer to open System Settings
+- **Hardware Unavailable**: Show overlay error, disconnect session
+- **Audio Startup Failure**: Log error, set sticky disconnect message
+
+### API Errors
+
+**Retryable** (connection issues, rate limits):
+- Transition to `connecting` state
+- Realtime client auto-reconnects with exponential backoff
+
+**Non-Retryable** (auth failure, invalid model):
+- Set `stickyDisconnectErrorMessage`
+- Disconnect session
+- Show overlay error with message
+
+**Barge-In Race Conditions** (`VoiceSessionCoordinator.swift:1146-1165`):
+Certain errors are benign (e.g., truncating a response that already ended):
+```swift
+let benignErrors = [
+    "response_cancel_not_active",
+    "item_truncate_invalid_item_id",
+    "conversation_already_has_active_response"
+]
+
+if benignErrors.contains(code) {
+    // Ignore and continue
+    return
+}
+```
+
+### Daemon Connection Loss
+
+- **During Voice Session**: Tools return error message, voice continues
+- **On Reconnect**: App re-registers with daemon via `voice_connect`
+- **Permanent Loss**: App continues voice-only (no workspace tools)
+
+## Performance Characteristics
+
+### Latency Budget
+
+- **User Speech → STT Transcript**: ~500ms (server VAD silence duration)
+- **Response Start → First Audio Delta**: ~300-800ms (model + TTS generation)
+- **Audio Delta → Playback**: &lt;50ms (local decode + enqueue)
+- **Barge-In Detection → Playback Stop**: &lt;100ms (hardware), ~400ms (software AEC)
+
+### Audio Buffering
+
+- **Capture Buffer**: 100ms chunks (2400 samples @ 24kHz)
+- **Playback Queue**: Adaptive (tracks unplayed duration for smooth transitions)
+- **WebSocket Send**: Non-blocking, queued writes
+
+### State Synchronization
+
+- **Voice State → Daemon**: Push on connect, tool calls, and disconnect
+- **Daemon → Voice**: Push on workspace/session change from CLI
+- **Polling Fallback**: 2s interval if daemon unavailable (workspace sync only)
+
+## Configuration
+
+**Runtime Settings** (loaded from `UserDefaults`, `VoiceSessionCoordinator.swift:613-618`):
+```swift
+struct RuntimeSettings {
+    var voice: String            // "alloy", "echo", "shimmer"
+    var model: String            // "gpt-4o-realtime-preview-2024-12-17"
+    var autoAbortOnBargeIn: Bool // Default: true
+}
+```
+
+**Audio Constants** (`AudioConstants.swift`):
+```swift
+static let sampleRate: Double = 24000.0
+static let channelCount: UInt32 = 1
+static let bitDepth: UInt32 = 16
+```
+
+## Testing
+
+Rubber Duck includes an E2E test for the full voice pipeline:
+
+```bash
+# Requires API key in /tmp/rubber-duck-live-realtime-test
+make e2e-swift
+```
+
+This test:
+1. Connects to Realtime API
+2. Sends pre-recorded audio ("What is 2+2?")
+3. Waits for response audio
+4. Validates transcript and audio playback
+5. Disconnects cleanly
+
+See `RubberDuckTests/RealtimeE2ETests.swift` for implementation.
+
+## Next Steps
+
+- [Pi Integration](/architecture/pi-integration) — How tools are executed via the daemon
+- [Session Model](/architecture/session-model) — Multi-session concurrency and persistence

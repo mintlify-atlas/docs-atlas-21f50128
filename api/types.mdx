@@ -1,0 +1,614 @@
+---
+title: TypeScript Types
+description: Complete type reference for the Rubber Duck CLI API
+---
+
+This page documents the core TypeScript types exported by `@rubberduck/cli`.
+
+## Daemon Protocol Types
+
+### DaemonRequest
+
+Discriminated union of all daemon request types.
+
+```typescript
+type DaemonRequest = {
+  [M in DaemonMethod]: {
+    id: string;
+    method: M;
+    params: DaemonRequestMap[M];
+  };
+}[DaemonMethod];
+```
+
+Each request has:
+- `id` — Unique request ID for correlation
+- `method` — One of the supported daemon methods
+- `params` — Type-safe parameters for that method
+
+### DaemonMethod
+
+```typescript
+type DaemonMethod =
+  | "attach"      // Attach to a workspace
+  | "follow"      // Subscribe to session events
+  | "unfollow"    // Unsubscribe from events
+  | "say"         // Send a message
+  | "sessions"    // List sessions
+  | "abort"       // Stop the running agent
+  | "doctor"      // Health checks
+  | "get_state"   // Get session state
+  | "ping"        // Liveness check
+  | "extension_ui_response"  // Respond to UI request
+  | "voice_connect"          // Connect voice session
+  | "voice_tool_call"        // Execute voice tool
+  | "voice_state";           // Update voice state
+```
+
+### DaemonRequestMap
+
+Maps each method to its parameter type.
+
+```typescript
+interface DaemonRequestMap {
+  ping: PingParams;           // {}
+  attach: AttachParams;       // { path?: string }
+  follow: FollowParams;       // { sessionId?: string }
+  unfollow: UnfollowParams;   // {}
+  say: SayParams;             // { message: string; sessionId?: string }
+  sessions: SessionsParams;   // { all?: boolean; workspaceId?: string }
+  abort: AbortParams;         // { sessionId?: string }
+  doctor: DoctorParams;       // {}
+  get_state: GetStateParams;  // { sessionId?: string }
+  extension_ui_response: ExtensionUiResponseParams;
+  voice_connect: VoiceConnectParams;
+  voice_tool_call: VoiceToolCallParams;
+  voice_state: VoiceStateParams;
+}
+```
+
+**Key Parameter Types:**
+
+<ParamField path="AttachParams">
+  ```typescript
+  { path?: string }  // Workspace path (defaults to cwd)
+  ```
+</ParamField>
+
+<ParamField path="SayParams">
+  ```typescript
+  { message: string; sessionId?: string }
+  ```
+</ParamField>
+
+<ParamField path="SessionsParams">
+  ```typescript
+  { all?: boolean; workspaceId?: string }
+  ```
+</ParamField>
+
+<ParamField path="ExtensionUiResponseParams">
+  ```typescript
+  {
+    id: string;          // Request ID from extension_ui_request
+    sessionId?: string;
+    value?: unknown;     // User's input/selection
+    confirmed?: boolean; // For confirm prompts
+    cancelled?: boolean; // User cancelled
+  }
+  ```
+</ParamField>
+
+### DaemonResponse
+
+```typescript
+interface DaemonResponse {
+  id: string;                      // Matches request ID
+  ok: boolean;                     // Success flag
+  data?: Record<string, unknown>;  // Response payload
+  error?: string;                  // Error message if ok=false
+}
+```
+
+**Example:**
+
+```typescript
+// Success
+{ id: "req_123", ok: true, data: { sessionId: "abc" } }
+
+// Error
+{ id: "req_456", ok: false, error: "Session not found" }
+```
+
+### DaemonEvent
+
+Asynchronous events pushed from the daemon.
+
+```typescript
+interface DaemonEvent {
+  event: string;                          // Event name (e.g., "pi_event")
+  sessionId: string;                      // Session that emitted the event
+  data: PiEvent | Record<string, unknown>; // Event payload
+}
+```
+
+### DaemonMessage
+
+Union of responses and events (what the daemon sends over the socket).
+
+```typescript
+type DaemonMessage = DaemonResponse | DaemonEvent;
+```
+
+**Type Guards:**
+
+```typescript
+function isDaemonResponse(msg: DaemonMessage): msg is DaemonResponse;
+function isDaemonEvent(msg: DaemonMessage): msg is DaemonEvent;
+```
+
+## Pi Event Types
+
+### PiEvent
+
+Discriminated union of all Pi agent events.
+
+```typescript
+type PiEvent =
+  | AgentStartEvent
+  | AgentEndEvent
+  | TurnStartEvent
+  | TurnEndEvent
+  | MessageStartEvent
+  | MessageUpdateEvent
+  | MessageEndEvent
+  | ToolExecutionStartEvent
+  | ToolExecutionUpdateEvent
+  | ToolExecutionEndEvent
+  | AutoCompactionStartEvent
+  | AutoCompactionEndEvent
+  | AutoRetryStartEvent
+  | AutoRetryEndEvent
+  | ExtensionErrorEvent
+  | PromptErrorEvent
+  | ExtensionUiRequestEvent;
+```
+
+### Agent Lifecycle Events
+
+```typescript
+interface AgentStartEvent {
+  type: "agent_start";
+}
+
+interface AgentEndEvent {
+  type: "agent_end";
+  messages: unknown[];  // Final message list
+}
+```
+
+### Turn Events
+
+```typescript
+interface TurnStartEvent {
+  type: "turn_start";
+}
+
+interface TurnEndEvent {
+  type: "turn_end";
+  message: AgentMessage;
+  toolResults: ToolResult[];
+}
+```
+
+### Message Events
+
+```typescript
+interface MessageStartEvent {
+  type: "message_start";
+  message: AgentMessage;
+}
+
+interface MessageUpdateEvent {
+  type: "message_update";
+  message: AgentMessage;
+  assistantMessageEvent: AssistantMessageDelta;
+}
+
+interface MessageEndEvent {
+  type: "message_end";
+  message: AgentMessage;
+}
+```
+
+### Tool Execution Events
+
+```typescript
+interface ToolExecutionStartEvent {
+  type: "tool_execution_start";
+  toolName: string;
+  toolCallId: string;
+  args: Record<string, unknown>;
+}
+
+interface ToolExecutionUpdateEvent {
+  type: "tool_execution_update";
+  toolName: string;
+  toolCallId: string;
+  args: Record<string, unknown>;
+  partialResult: ToolContent;  // Streaming output
+}
+
+interface ToolExecutionEndEvent {
+  type: "tool_execution_end";
+  toolName: string;
+  toolCallId: string;
+  result: ToolContent;
+  isError: boolean;
+  exitCode?: number;  // For bash tools
+}
+```
+
+### Compaction Events
+
+```typescript
+interface AutoCompactionStartEvent {
+  type: "auto_compaction_start";
+  reason: "threshold" | "overflow";
+}
+
+interface AutoCompactionEndEvent {
+  type: "auto_compaction_end";
+  aborted: boolean;
+  willRetry: boolean;
+  result: { summary: string; tokensBefore: number } | null;
+  errorMessage?: string;
+}
+```
+
+### Retry Events
+
+```typescript
+interface AutoRetryStartEvent {
+  type: "auto_retry_start";
+  attempt: number;
+  maxAttempts: number;
+  delayMs: number;
+  errorMessage: string;
+}
+
+interface AutoRetryEndEvent {
+  type: "auto_retry_end";
+  attempt: number;
+  success: boolean;
+  finalError?: string;
+}
+```
+
+### Error Events
+
+```typescript
+interface ExtensionErrorEvent {
+  type: "extension_error";
+  extensionPath: string;
+  event: string;      // Event that threw
+  error: string;      // Error message
+}
+
+interface PromptErrorEvent {
+  type: "prompt_error";
+  error: string;
+}
+```
+
+### UI Request Event
+
+```typescript
+interface ExtensionUiRequestEvent {
+  type: "extension_ui_request";
+  id: string;
+  method:
+    | "select"       // Choose from options
+    | "confirm"      // Yes/no
+    | "input"        // Text input
+    | "editor"       // Multi-line input
+    | "notify"       // Show notification
+    | "setStatus"    // Set status message
+    | "setWidget"    // Custom widget
+    | "setTitle"     // Set window title
+    | "set_editor_text";
+  
+  message?: string;
+  title?: string;
+  placeholder?: string;
+  prefill?: string;
+  options?: Array<string | { label: string; value: string }>;
+  notifyType?: "info" | "warning" | "error";
+  timeout?: number;  // Auto-dismiss after ms
+}
+```
+
+**Type Guard:**
+
+```typescript
+function isExtensionUiRequestEvent(
+  event: PiEvent | Record<string, unknown>
+): event is ExtensionUiRequestEvent;
+```
+
+## Supporting Types
+
+### AgentMessage
+
+```typescript
+interface AgentMessage {
+  id?: string;
+  role:
+    | "user"
+    | "assistant"
+    | "toolResult"
+    | "bashExecution"
+    | "custom"
+    | "branchSummary"
+    | "compactionSummary";
+  content?: string | ContentBlock[];
+  timestamp?: string;
+}
+```
+
+### ContentBlock
+
+```typescript
+interface ContentBlock {
+  type: "text" | "tool_use" | "tool_result" | "thinking";
+  id?: string;
+  text?: string;
+  name?: string;  // Tool name
+  input?: Record<string, unknown>;  // Tool arguments
+}
+```
+
+### AssistantMessageDelta
+
+Streaming update types:
+
+```typescript
+type AssistantMessageDeltaType =
+  | "start"
+  | "text_start" | "text_delta" | "text_end"
+  | "thinking_start" | "thinking_delta" | "thinking_end"
+  | "toolcall_start" | "toolcall_delta" | "toolcall_end"
+  | "done"
+  | "error";
+
+interface AssistantMessageDelta {
+  type: AssistantMessageDeltaType;
+  delta?: string;        // Text/thinking delta
+  contentIndex?: number; // Block index
+  toolCall?: PiToolCall; // Tool being called
+  partial?: unknown;     // Partial JSON
+  reason?: string;       // Error reason
+}
+```
+
+### ToolContent
+
+```typescript
+interface ToolContent {
+  content: Array<{ type: string; text?: string }>;
+  details?: {
+    truncation?: string;      // "exceeded 2000 lines"
+    fullOutputPath?: string;  // Path to full output file
+  };
+}
+```
+
+### ToolResult
+
+```typescript
+interface ToolResult {
+  toolCallId: string;
+  toolName: string;
+  content: Array<{ type: string; text?: string }>;
+  isError: boolean;
+}
+```
+
+## Session & Workspace Types
+
+### Session
+
+```typescript
+interface Session {
+  id: string;
+  name: string;
+  workspaceId: string;
+  piSessionFile: string;      // Path to Pi session JSON
+  createdAt: string;          // ISO timestamp
+  lastActiveAt: string;
+  isVoiceActive: boolean;
+}
+```
+
+### Workspace
+
+```typescript
+interface Workspace {
+  id: string;
+  path: string;               // Absolute path
+  createdAt: string;
+  lastActiveSessionId: string | null;
+}
+```
+
+### DaemonMetadata
+
+```typescript
+interface DaemonMetadata {
+  version: number;
+  workspaces: Workspace[];
+  sessions: Session[];
+  activeVoiceSessionId: string | null;
+}
+```
+
+## Pi State Types
+
+### PiState
+
+Current state of a Pi session.
+
+```typescript
+interface PiState {
+  sessionId: string;
+  sessionName: string;
+  sessionFile: string;
+  model: string;               // e.g., "gpt-4o-mini"
+  thinkingLevel: string;       // "off" | "minimal" | "low" | ...
+  messageCount: number;
+  pendingMessageCount: number;
+  isStreaming: boolean;
+  isCompacting: boolean;
+  autoCompactionEnabled: boolean;
+}
+```
+
+### PiSessionStats
+
+Usage statistics for a session.
+
+```typescript
+interface PiSessionStats {
+  sessionId: string;
+  sessionFile: string;
+  totalMessages: number;
+  userMessages: number;
+  assistantMessages: number;
+  toolCalls: number;
+  toolResults: number;
+  tokens: {
+    input: number;
+    output: number;
+    cacheRead: number;
+    cacheWrite: number;
+    total: number;
+  };
+  cost: number;  // USD
+}
+```
+
+## Renderer Types
+
+### RendererOptions
+
+```typescript
+interface RendererOptions {
+  json: boolean;         // NDJSON mode
+  color: boolean;        // ANSI colors
+  showThinking: boolean; // Show <thinking> blocks
+  verbose: boolean;      // Debug output
+}
+```
+
+### EventRenderer
+
+```typescript
+interface EventRenderer {
+  render(event: RendererPiEvent): void | Promise<void>;
+  cleanup(): void;
+}
+```
+
+### RendererPiEvent
+
+```typescript
+type RendererPiEvent = PiEvent | AppHistoryEvent;
+
+interface AppHistoryEvent {
+  type: "app_history_event";
+  appEventType: string;  // "user_audio", "assistant_text", etc.
+  sessionID?: string;
+  timestamp?: string;
+  text?: string;
+  metadata?: Record<string, string>;
+}
+```
+
+## Utility Types
+
+### DoctorCheck
+
+```typescript
+interface DoctorCheck {
+  name: string;           // Check name
+  status: "ok" | "warn" | "fail";
+  message: string;        // Human-readable result
+}
+```
+
+## Usage Examples
+
+### Type-Safe Request
+
+```typescript
+import type { DaemonRequestMap, DaemonResponse } from '@rubberduck/cli';
+
+type SayParams = DaemonRequestMap['say'];
+// { message: string; sessionId?: string }
+
+const params: SayParams = {
+  message: 'Hello',
+  sessionId: 'abc123'
+};
+
+const response: DaemonResponse = await client.request('say', params);
+```
+
+### Event Type Narrowing
+
+```typescript
+import type { PiEvent } from '@rubberduck/cli';
+
+function handleEvent(event: PiEvent) {
+  switch (event.type) {
+    case 'message_update':
+      // TypeScript knows event.assistantMessageEvent exists
+      if (event.assistantMessageEvent.type === 'text_delta') {
+        console.log(event.assistantMessageEvent.delta);
+      }
+      break;
+      
+    case 'tool_execution_start':
+      // TypeScript knows event.toolName and event.args exist
+      console.log(`Calling ${event.toolName} with`, event.args);
+      break;
+  }
+}
+```
+
+### UI Request Handling
+
+```typescript
+import { isExtensionUiRequestEvent } from '@rubberduck/cli';
+import type { ExtensionUiResponseParams } from '@rubberduck/cli';
+
+client.onEvent(async (daemonEvent) => {
+  if (isExtensionUiRequestEvent(daemonEvent.data)) {
+    const uiEvent = daemonEvent.data;
+    
+    let value: unknown;
+    if (uiEvent.method === 'confirm') {
+      value = await askYesNo(uiEvent.message);
+    }
+    
+    const response: ExtensionUiResponseParams = {
+      id: uiEvent.id,
+      sessionId: daemonEvent.sessionId,
+      value,
+      confirmed: value === true
+    };
+    
+    await client.request('extension_ui_response', response);
+  }
+});
+```

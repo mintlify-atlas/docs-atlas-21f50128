@@ -1,0 +1,612 @@
+---
+title: Pi Integration
+description: RPC mode, tool execution, event streaming, and session management
+---
+
+Rubber Duck uses [Pi](https://github.com/badlogic/pi-mono) as the underlying coding agent runtime. Pi provides the tool harness, session persistence, and agent loop. The daemon spawns Pi in **RPC mode**, communicating via JSON over stdin/stdout.
+
+## Pi RPC Mode
+
+Pi's RPC mode is explicitly designed for embedding and headless operation. It exposes:
+
+- **Structured command/response protocol** with request IDs
+- **Event stream** for message deltas, tool execution updates, and lifecycle events
+- **Session management** (create, resume, switch, fork)
+- **Built-in tools** (read, write, edit, bash, grep, find)
+- **Extension support** for custom tools via skills
+
+Rubber Duck **never scrapes terminal output** — all interaction is via the RPC protocol.
+
+## Spawning Pi Processes
+
+The daemon spawns one Pi subprocess per session, managed by `PiProcessManager` and `PiProcess`.
+
+### Spawn Command (`cli/src/daemon/pi-process.ts:46-80`)
+
+```typescript
+const args = [
+  "--mode", "rpc",
+  "--session-dir", SESSIONS_DIR,  // ~/Library/Application Support/RubberDuck/pi-sessions/
+  "--tools", PI_TOOLS.join(","),  // read,write,edit,bash,grep,find
+];
+
+if (piModel) {
+  args.push("--model", piModel);  // gpt-4o-mini, gpt-4o, etc.
+}
+if (piProvider) {
+  args.push("--provider", piProvider);  // openai, anthropic
+}
+args.push("--thinking", PI_DEFAULT_THINKING);  // "off" for speed
+
+if (sessionFile) {
+  args.push("--session", sessionFile);  // Resume specific session
+}
+if (continueSession) {
+  args.push("-c");  // Continue most recent session
+}
+
+this.process = spawn(PI_BINARY, args, {
+  cwd: workspacePath,  // Pi executes all commands in workspace
+  stdio: ["pipe", "pipe", "pipe"],
+  env: { ...process.env },
+});
+```
+
+### Tool Set
+
+Rubber Duck enables Pi's default tool set:
+
+1. **`read`**: Read file contents (supports multiple files)
+2. **`write`**: Write or overwrite file
+3. **`edit`**: Apply precise edits with old/new string replacement
+4. **`bash`**: Execute shell commands in workspace
+5. **`grep`**: Search file contents with regex
+6. **`find`**: Search for files by name pattern
+
+These tools are **always enabled** for best DX. The PRD mentions a future "Safe mode" toggle to restrict write/edit/bash (Section 13), but this is not implemented in v1.
+
+### Model Configuration
+
+Pi model selection is determined by:
+
+1. `RUBBER_DUCK_PI_MODEL` environment variable (e.g., `gpt-4o-mini`, `gpt-4o`)
+2. If unset and `OPENAI_API_KEY` is present: default to `gpt-4o-mini`
+3. Otherwise: Pi uses its own default model
+
+Provider is resolved similarly via `RUBBER_DUCK_PI_PROVIDER` or auto-detected from API keys.
+
+**Thinking Level** (`RUBBER_DUCK_PI_THINKING`):
+- Default: `off` (for speed)
+- Options: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`
+
+## RPC Protocol
+
+### Command/Response
+
+The daemon sends commands to Pi stdin as NDJSON:
+
+```json
+{ "id": "req_abc123", "type": "prompt", "text": "List files in src/" }
+```
+
+Pi responds on stdout:
+
+```json
+{
+  "id": "req_abc123",
+  "command": "prompt",
+  "success": true,
+  "data": { ... }
+}
+```
+
+**Request Correlation** (`cli/src/daemon/pi-process.ts:184-213`):
+```typescript
+sendCommand(command: string, params?: Record<string, unknown>): Promise<PiRpcResponse> {
+  const id = generateId();
+  const request: PiRpcRequest = { id, type: command, ...params };
+  const line = `${JSON.stringify(request)}\n`;
+
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      this.pending.delete(id);
+      reject(new Error(`Pi command "${command}" timed out after 30s`));
+    }, PI_COMMAND_TIMEOUT_MS);
+
+    this.pending.set(id, { command, resolve, reject, timer });
+    this.process.stdin?.write(line);
+  });
+}
+```
+
+### Event Stream
+
+Pi pushes events to stdout (no `id` field):
+
+```json
+{ "type": "message_update", "content": [{ "text": "Here are the files..." }] }
+{ "type": "tool_execution_start", "tool": "bash", "args": { "command": "ls src/" } }
+{ "type": "tool_execution_update", "stdout": "file1.ts\nfile2.ts\n" }
+{ "type": "tool_execution_end", "exit_code": 0 }
+{ "type": "agent_end", "reason": "complete" }
+```
+
+**Event Handling** (`cli/src/daemon/pi-process.ts:106-130`):
+```typescript
+const rl = createInterface({ input: this.process.stdout });
+rl.on("line", (line) => {
+  const msg = JSON.parse(line);
+  if (msg.type === "response") {
+    this.handleResponse(msg as PiRpcResponse);
+  } else {
+    // It's an event — forward to all event handlers
+    for (const handler of this.eventHandlers) {
+      handler(msg as PiEvent);
+    }
+  }
+});
+```
+
+### Key Commands
+
+#### `prompt`
+
+Sends a user message to Pi and starts agent turn.
+
+```typescript
+await piProcess.sendCommand("prompt", { text: "Fix the bug in server.ts" });
+```
+
+Response acknowledges receipt; actual work streams via events.
+
+#### `abort`
+
+Cancels the currently running agent operation.
+
+```typescript
+await piProcess.sendCommand("abort");
+```
+
+Pi stops mid-execution, may kill running bash commands, and emits `agent_end` with `reason: "aborted"`.
+
+#### `get_state`
+
+Queries current session state.
+
+```typescript
+const response = await piProcess.sendCommand("get_state");
+const { sessionId, sessionFile, sessionName } = response.data;
+```
+
+Used by the daemon to sync session metadata and by `duck doctor` for diagnostics.
+
+## Event Bus and Pub/Sub
+
+The daemon uses an **EventBus** to fan out Pi events to multiple subscribed clients (CLI terminals, voice app).
+
+### Subscription Model (`cli/src/daemon/event-bus.ts`)
+
+```typescript
+export class EventBus {
+  private subscriptions = new Map<
+    string,  // clientId
+    Map<string, (event: PiEvent) => void>  // sessionId → handler
+  >();
+
+  subscribe(clientId: string, sessionId: string, handler: (event: PiEvent) => void) {
+    // ...
+  }
+
+  publish(sessionId: string, event: PiEvent) {
+    // Send to all clients subscribed to this sessionId
+  }
+}
+```
+
+**Flow**:
+1. CLI runs `duck attach` → daemon subscribes client to session
+2. Pi emits `message_update` → daemon publishes to event bus
+3. Event bus forwards event to subscribed client(s)
+4. Client's socket receives NDJSON event: `{ event: "pi_event", sessionId, data: {...} }`
+5. CLI renderer formats and prints to terminal
+
+### Multi-Client Support
+
+Multiple terminals can follow the same session:
+
+```bash
+# Terminal 1
+duck ~/my-repo
+
+# Terminal 2 (same repo)
+duck ~/my-repo
+```
+
+Both receive identical event streams. This is useful for:
+- Monitoring a background session
+- Pair programming (one voice, one terminal)
+- Debugging (verbose mode in one terminal, clean in another)
+
+## Tool Execution
+
+### CLI-Driven Tools (Pi Executes)
+
+When the user types `duck say "run the tests"`, Pi receives the prompt and decides to call `bash`:
+
+1. **Pi emits** `tool_execution_start`:
+   ```json
+   {
+     "type": "tool_execution_start",
+     "tool": "bash",
+     "id": "tool_abc",
+     "args": { "command": "npm test" }
+   }
+   ```
+
+2. **Pi executes** `npm test` in workspace, streaming stdout:
+   ```json
+   { "type": "tool_execution_update", "id": "tool_abc", "stdout": "PASS tests/app.test.ts\n" }
+   ```
+
+3. **Pi emits** `tool_execution_end`:
+   ```json
+   {
+     "type": "tool_execution_end",
+     "id": "tool_abc",
+     "exit_code": 0,
+     "stdout": "PASS tests/app.test.ts\n...",
+     "stderr": ""
+   }
+   ```
+
+4. **Pi continues** agent turn, potentially calling more tools or generating a response.
+
+The CLI renders these events in real-time:
+
+```
+[tool] bash: npm test
+  PASS tests/app.test.ts
+  ...
+[tool] ✓ exit 0
+
+[assistant] All tests passed!
+```
+
+### Voice-Driven Tools (Daemon Executes)
+
+When the assistant calls a tool **during a voice session**, execution is handled by the daemon, not Pi. This is because Pi is not running for voice sessions — the voice app uses the OpenAI Realtime API directly.
+
+**Flow** (`cli/src/daemon/voice-tools.ts`):
+
+1. **Realtime API** sends `response.function_call_arguments.done`
+2. **VoiceSessionCoordinator** enqueues function call
+3. **App** sends `voice_tool_call` request to daemon:
+   ```json
+   {
+     "method": "voice_tool_call",
+     "params": {
+       "callId": "call_abc",
+       "toolName": "read_file",
+       "arguments": "{\"path\":\"src/app.ts\"}",
+       "workspacePath": "/Users/me/my-repo"
+     }
+   }
+   ```
+
+4. **Daemon** executes tool:
+   ```typescript
+   // Parse arguments
+   const args = JSON.parse(arguments);
+   
+   // Execute tool
+   if (toolName === "read_file") {
+     const content = readFileSync(args.path, "utf-8");
+     return { result: content };
+   }
+   ```
+
+5. **Daemon** returns result
+6. **App** sends result to Realtime API:
+   ```swift
+   realtimeClient.sendToolResult(callId: callId, output: result)
+   ```
+
+**Supported Voice Tools**:
+- `read_file(path)`
+- `write_file(path, content)`
+- `edit_file(path, oldString, newString, replaceAll?)`
+- `bash(command)`
+- `grep_search(pattern, include?)`
+- `find_files(pattern)`
+
+These match Pi's built-in tools but are reimplemented in the daemon for voice sessions.
+
+### Tool Confinement
+
+All tool execution (Pi and daemon) is confined to the **workspace directory**:
+
+- Pi subprocess `cwd` is set to workspace path
+- Daemon voice tools execute with workspace as base path
+- Relative paths are resolved within workspace
+- Absolute paths and `..` escapes are allowed but discouraged (future: enforce workspace confinement)
+
+## Session Management
+
+### Session Persistence
+
+Pi sessions are stored as JSONL files:
+
+```
+~/Library/Application Support/RubberDuck/pi-sessions/
+  <sessionId>.jsonl
+```
+
+Each line is a conversation event:
+
+```jsonl
+{"type":"user","content":"Fix the bug"}
+{"type":"assistant","content":"I'll help fix that. First, let me check the code."}
+{"type":"tool_call","tool":"read","args":{"path":"app.ts"}}
+{"type":"tool_result","output":"...file contents..."}
+```
+
+Pi manages this file automatically. The daemon only:
+- Specifies `--session-dir` to isolate Rubber Duck sessions
+- Tracks session metadata (ID, name, workspace) in `metadata.json`
+
+### Resume and Continue
+
+**Resume Specific Session**:
+```bash
+duck attach --session my-feature-work
+```
+
+Daemon spawns Pi with `--session <sessionFile>`.
+
+**Continue Most Recent**:
+```bash
+duck attach -c
+```
+
+Daemon spawns Pi with `-c` flag (Pi resumes last session in session dir).
+
+### Multiple Sessions Per Workspace
+
+Users can create multiple independent conversation threads in the same repo:
+
+```bash
+# Terminal 1: debug session
+duck ~/my-repo --name debug-tests
+
+# Terminal 2: refactor session
+duck ~/my-repo --name refactor-module
+```
+
+Each gets its own:
+- Pi subprocess
+- Session JSONL file
+- Event stream subscription
+
+The **active voice session** is the one that receives voice input. CLI sessions are independent and can run concurrently.
+
+### Switching Voice Session
+
+The voice app can switch between sessions:
+
+1. **From CLI**:
+   ```bash
+   duck use debug-tests
+   ```
+   
+   Daemon updates `metadata.json` and pushes `voice_session_changed` event to app.
+
+2. **From Menu Bar**:
+   User selects session from popover list. App updates selection and daemon is notified.
+
+3. **From Hotkey**:
+   App reads `metadata.json` on connect to sync latest selection.
+
+## Health Monitoring
+
+The daemon runs a health monitor that checks Pi process liveness every 30 seconds (`cli/src/daemon/health.ts`):
+
+```typescript
+export class HealthMonitor {
+  start() {
+    this.interval = setInterval(() => {
+      for (const [sessionId, session] of metadataStore.getSessions()) {
+        const piProcess = processManager.get(sessionId);
+        if (piProcess && !piProcess.isAlive()) {
+          // Pi died unexpectedly — clean up
+          processManager.remove(sessionId);
+          eventBus.publish(sessionId, { type: "pi_died", exitCode: piProcess.getExitCode() });
+        }
+      }
+    }, 30000);
+  }
+}
+```
+
+If a Pi process crashes:
+- Event bus publishes `pi_died` event
+- CLI displays error and exits (if following that session)
+- Voice app shows error overlay (if that session was active)
+
+## Extension UI Requests
+
+Pi supports interactive prompts via `extension_ui_request` events. For example, a Pi skill might ask:
+
+```json
+{
+  "type": "extension_ui_request",
+  "ui_type": "confirm",
+  "message": "Apply this migration? (y/n)"
+}
+```
+
+**CLI Handling** (`cli/src/renderer/ui-handler.ts`):
+
+The `follow` and `say` commands auto-handle UI requests using `@clack/prompts`:
+
+```typescript
+import { confirm, text } from "@clack/prompts";
+
+export async function handleUIRequest(event: ExtensionUIRequestEvent): Promise<string> {
+  if (event.ui_type === "confirm") {
+    const answer = await confirm({ message: event.message });
+    return answer ? "yes" : "no";
+  }
+  if (event.ui_type === "input") {
+    const answer = await text({ message: event.message });
+    return String(answer);
+  }
+  throw new Error(`Unsupported ui_type: ${event.ui_type}`);
+}
+```
+
+Response is sent back to daemon:
+
+```typescript
+await daemonClient.request("extension_ui_response", { sessionId, response });
+```
+
+Daemon forwards to Pi:
+
+```typescript
+piProcess.sendUntracked("extension_ui_response", { response });
+```
+
+Pi receives the response and continues execution.
+
+**Voice Sessions**:
+Extension UI is **not supported** during voice sessions. If Pi emits `extension_ui_request` during voice, the daemon returns a placeholder response and logs a warning.
+
+## Error Handling
+
+### Pi Process Crashes
+
+```typescript
+this.process.on("exit", (code) => {
+  this.alive = false;
+  this.exitCode = code;
+  
+  // Reject all pending requests
+  for (const [id, pending] of this.pending) {
+    clearTimeout(pending.timer);
+    pending.reject(new Error(`Pi process exited with code ${code}`));
+  }
+});
+```
+
+Clients receive error responses for in-flight requests. Event bus publishes `pi_died`.
+
+### Command Timeouts
+
+Each Pi command has a 30-second timeout. If Pi doesn't respond:
+
+```typescript
+const timer = setTimeout(() => {
+  this.pending.delete(id);
+  reject(new Error(`Pi command "${command}" timed out after 30s`));
+}, PI_COMMAND_TIMEOUT_MS);
+```
+
+### Tool Execution Failures
+
+Pi tools can fail (e.g., file not found, bash command error). Pi emits:
+
+```json
+{
+  "type": "tool_execution_end",
+  "id": "tool_abc",
+  "exit_code": 1,
+  "stderr": "Error: File not found"
+}
+```
+
+Pi continues the agent turn with this error context and typically explains the failure to the user.
+
+### Prompt Errors
+
+If a prompt fails (e.g., model API error), Pi returns:
+
+```json
+{
+  "id": "req_abc",
+  "command": "prompt",
+  "success": false,
+  "error": "OpenAI API rate limit exceeded"
+}
+```
+
+The CLI displays the error and exits.
+
+## Configuration
+
+### Pi Binary Resolution (`cli/src/constants.ts`)
+
+```typescript
+export const PI_BINARY = (() => {
+  // 1. Explicit override
+  if (process.env.RUBBER_DUCK_PI_BINARY) {
+    return process.env.RUBBER_DUCK_PI_BINARY;
+  }
+  
+  // 2. Local node_modules/.bin/pi (for development)
+  const localPi = path.join(process.cwd(), "node_modules", ".bin", "pi");
+  if (existsSync(localPi)) {
+    return localPi;
+  }
+  
+  // 3. System PATH
+  return "pi";
+})();
+```
+
+### Model and Provider
+
+```typescript
+export function resolveDefaultPiModel(): string | undefined {
+  return process.env.RUBBER_DUCK_PI_MODEL || 
+         (process.env.OPENAI_API_KEY ? "gpt-4o-mini" : undefined);
+}
+
+export function resolveDefaultPiProvider(): string | undefined {
+  return process.env.RUBBER_DUCK_PI_PROVIDER ||
+         (process.env.OPENAI_API_KEY ? "openai" : undefined) ||
+         (process.env.ANTHROPIC_API_KEY ? "anthropic" : undefined);
+}
+```
+
+### Session Directory
+
+```typescript
+export const SESSIONS_DIR = path.join(
+  APP_SUPPORT,  // ~/Library/Application Support/RubberDuck/
+  "pi-sessions"
+);
+```
+
+## Testing
+
+Rubber Duck includes E2E tests for the full daemon + Pi integration:
+
+```bash
+# Requires OPENAI_API_KEY or ANTHROPIC_API_KEY
+make e2e-cli
+```
+
+This test:
+1. Starts daemon
+2. Attaches workspace
+3. Sends prompt: "List files in the current directory"
+4. Validates Pi events (tool_execution_start, tool_execution_end, agent_end)
+5. Checks final response contains file names
+6. Cleans up daemon
+
+See `cli/tests/e2e.test.ts` for implementation.
+
+## Next Steps
+
+- [Architecture Overview](/architecture/overview) — Full system diagram
+- [Session Model](/architecture/session-model) — Workspaces, sessions, concurrency, persistence

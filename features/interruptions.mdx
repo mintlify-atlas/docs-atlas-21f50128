@@ -1,0 +1,372 @@
+---
+title: Interruptions & Barge-In
+description: Detailed guide to barge-in behavior, abort vs. steer modes, echo cancellation, and interruption handling
+---
+
+Rubber Duck supports **instant interruptions**: you can speak while the assistant is responding to stop playback and steer the conversation.
+
+This page covers the technical details of how barge-in works, the trade-offs between abort and steer modes, and how echo cancellation affects reliability.
+
+## What is Barge-In?
+
+Barge-in (also called "interruption" or "cut-in") is the ability to interrupt the assistant mid-response by speaking.
+
+When you interrupt:
+
+1. **Audio playback stops immediately** (within ~50ms)
+2. **The server is notified** via `conversation.item.truncate` with the exact playback position
+3. **Your new speech is processed** as either a fresh user turn (abort mode) or a steering message (steer mode)
+4. **The session returns to listening** and you can continue the conversation
+
+Barge-in is essential for natural conversation flow. Without it, you'd have to wait for the assistant to finish speaking before you could correct a mistake or change direction.
+
+## How Barge-In Works
+
+### 1. Speech Detection During Playback
+
+While the assistant is speaking (`sessionState == .speaking`), Rubber Duck continues to monitor for incoming `speech_started` events from the OpenAI Realtime API's server-side VAD.
+
+The microphone remains **open** during playback when hardware AEC (VoiceProcessingIO) is active. Without hardware AEC, the microphone is **muted** during playback and re-enabled after the audio queue drains (see [Echo Cancellation](#echo-cancellation-and-barge-in)).
+
+Implemented in `VoiceSessionCoordinator.swift:824-876`.
+
+### 2. Confirmation Delay
+
+When `speech_started` is detected during playback, Rubber Duck schedules a **confirmation delay** before triggering barge-in.
+
+The delay prevents false positives from:
+
+- **Echo**: The assistant's voice being picked up by the microphone ("echo bleed")
+- **Noise**: Brief background sounds triggering VAD
+
+The default confirmation delay is **350ms**, but it's automatically tuned based on the active echo cancellation mode:
+
+| Echo Cancellation | Minimum Confirmation Delay |
+|-------------------|---------------------------|
+| Hardware AEC (VoiceProcessingIO) | 350ms (default) |
+| Software AEC | 450ms |
+| No AEC | 550ms |
+
+Implemented in `VoiceSessionCoordinator.swift:315-324`.
+
+<Info>
+You can adjust the base confirmation delay in Settings, but the minimum is enforced based on your AEC mode to prevent echo-triggered interruptions.
+</Info>
+
+### 3. Playback Stop
+
+If speech continues for the full confirmation delay, barge-in is **confirmed**.
+
+Rubber Duck:
+
+1. Calls `AVAudioPlayerNode.stopImmediately()` to halt audio playback
+2. Captures the exact playback position (samples played out of total scheduled)
+3. Calculates `audioEnd` in milliseconds (relative to the start of the current audio item)
+
+Implemented in `VoiceSessionCoordinator.swift:326-389`.
+
+<Tip>
+`stopImmediately()` returns the number of unplayed samples. This allows Rubber Duck to calculate the exact truncation point without timing drift.
+</Tip>
+
+### 4. Response Truncation
+
+Rubber Duck sends `conversation.item.truncate` to the server with:
+
+- **`item_id`**: The ID of the audio item being interrupted
+- **`content_index`**: The index of the audio content part (usually 0)
+- **`audio_end_ms`**: The playback position in milliseconds (clamped to the item duration)
+
+This tells the server to discard any audio and text after the truncation point, effectively "rewinding" the conversation to the moment you interrupted.
+
+The server responds with `response.cancelled`, and Rubber Duck transitions back to **listening** state.
+
+<Note>
+Truncation is **precise**: the conversation tree reflects exactly what you heard, not what the model generated. This prevents the model from assuming you heard content that was cut off.
+</Note>
+
+### 5. New User Turn
+
+Your new speech is processed as a fresh user turn. The server transcribes it and appends it to the conversation, then generates a new response.
+
+The interrupted response is discarded (in abort mode) or paused (in steer mode — see below).
+
+## Abort vs. Steer Modes
+
+Rubber Duck offers two interruption strategies, controlled by the **"Auto-abort on barge-in"** toggle in Settings.
+
+### Abort Mode (Default)
+
+**When enabled** (Auto-abort ON):
+
+1. **Playback stops immediately**
+2. **The assistant's response is truncated** at the playback position
+3. **Planned tool calls are discarded** (if the response included tool calls that haven't started yet)
+4. **Your new speech is treated as a fresh user turn**
+
+This is best for:
+
+- **Course corrections**: "Wait, that's wrong — try X instead"
+- **Topic changes**: "Actually, let's do something else"
+- **Canceling long-running operations**: "Stop — I don't need that anymore"
+
+**Example:**
+
+Assistant: "I'll refactor the login function, run tests, and update the documentation—"
+
+You (interrupt): "Wait, don't touch the documentation."
+
+Rubber Duck:
+
+1. Stops playback after "update the"
+2. Truncates the response (discards "documentation" and any planned `edit_file` tool calls)
+3. Processes "Wait, don't touch the documentation" as a new user turn
+
+The model sees:
+
+```
+Assistant: "I'll refactor the login function, run tests, and update the"
+User: "Wait, don't touch the documentation."
+```
+
+### Steer Mode (Auto-Abort Disabled)
+
+**When disabled** (Auto-abort OFF):
+
+1. **Playback stops immediately**
+2. **Your new speech is sent as a "steer" message** to the server
+3. **The server delivers the steer message after the current tool completes**
+4. **Remaining planned tool calls are skipped**
+
+This is best for:
+
+- **Refinements**: "Add error handling to that function"
+- **Additional constraints**: "Make sure it's backward compatible"
+- **Follow-up instructions**: "Also log the result"
+
+The server's `steer` behavior (from Pi RPC) queues your message to be injected after the current operation, allowing the assistant to apply your feedback mid-turn.
+
+**Example:**
+
+Assistant: "I'll refactor the login function, run tests, and update the documentation—"
+
+You (interrupt): "Add error handling too."
+
+Rubber Duck:
+
+1. Stops playback after "update the"
+2. Sends "Add error handling too" as a steer message
+3. The server finishes the current tool call (if running), then reads the steer message
+4. The assistant responds: "Got it, I'll also add error handling."
+
+The model sees the steer message as a **refinement** rather than a cancellation.
+
+<Warning>
+Steer mode requires the server to support queued messages during a response. The OpenAI Realtime API may not fully support this yet — abort mode is more reliable.
+</Warning>
+
+### Choosing Between Modes
+
+| Scenario | Recommended Mode |
+|----------|------------------|
+| "Stop, that's completely wrong" | **Abort** |
+| "Actually, do X instead of Y" | **Abort** |
+| "Also add Z to that" | **Steer** |
+| "Make sure it's thread-safe" | **Steer** |
+| "Cancel the current operation" | **Abort** |
+
+You can toggle the mode in **Settings > Voice** or by asking Rubber Duck to change it:
+
+```bash
+duck say "enable auto-abort on barge-in"
+```
+
+## Echo Cancellation and Barge-In
+
+Barge-in reliability depends on **echo cancellation** — preventing the assistant's voice from being picked up by your microphone and mistaken for user speech.
+
+### Hardware AEC (VoiceProcessingIO)
+
+When **VoiceProcessingIO** is active (default on supported devices), macOS applies hardware-level acoustic echo cancellation:
+
+- The microphone and speaker share a reference signal at the audio driver level
+- Echo is cancelled in **real time** before reaching the capture buffer
+- The microphone can **stay open** during playback without risk of echo feedback
+
+This enables **instant barge-in** with minimal confirmation delay (350ms default).
+
+**Supported devices:**
+
+- MacBook Pro (2016+)
+- MacBook Air (2018+)
+- iMac (2017+)
+- Mac Studio, Mac mini (2020+)
+
+Implemented in `AudioManager.swift:333-354`.
+
+<Tip>
+You can check if hardware AEC is active in the menu bar popover or by running `duck doctor`.
+</Tip>
+
+### Software AEC
+
+If VoiceProcessingIO fails to initialize (e.g., due to external audio interfaces or Bluetooth devices), Rubber Duck falls back to **software AEC**:
+
+1. The playback manager writes every PCM chunk to a **ring buffer** (`PlaybackReferenceBuffer`)
+2. The capture tap reads the ring buffer with an **estimated delay** (measured in samples)
+3. The reference signal is **subtracted** from the captured microphone signal using SIMD (Accelerate framework)
+
+Software AEC is less effective than hardware AEC, so the confirmation delay is increased to **450ms minimum**.
+
+Implemented in `AudioManager.swift:425-453` and `PlaybackReferenceBuffer.swift`.
+
+<Note>
+Software AEC uses adaptive gain calibration: the subtraction gain is continuously tuned based on the ratio of capture RMS to reference RMS during playback-only windows.
+</Note>
+
+### No AEC (Fallback)
+
+If neither hardware nor software AEC is available (e.g., no playback reference buffer), Rubber Duck uses **input muting**:
+
+1. The microphone is **muted** (`muteInput = true`) when the assistant starts speaking
+2. Capture continues (silence is sent to the server), so VAD stays active
+3. After playback **finishes and drains**, the microphone is **unmuted** with a delay (400ms + poll for queue drain)
+
+This prevents echo but **delays barge-in**: you can't interrupt until the audio queue drains.
+
+The confirmation delay is increased to **550ms minimum** to account for the unmute transition period.
+
+Implemented in `VoiceSessionCoordinator.swift:432-459`.
+
+<Warning>
+Without AEC, barge-in is less responsive. Consider using an external microphone with hardware AEC support (e.g., USB mic with built-in DSP).
+</Warning>
+
+## Suppression Windows
+
+To further reduce false positives, Rubber Duck applies **VAD suppression windows** after the assistant stops speaking:
+
+1. **Post-playback suppression** (no AEC only): 900ms after playback ends, any `speech_started` events are ignored
+2. **Post-audio-delta guard** (all modes): For 220ms (hardware AEC) or 450ms (no AEC) after the last audio delta, `speech_started` is ignored
+
+This prevents residual echo or speaker resonance from triggering false barge-ins immediately after the assistant finishes.
+
+Implemented in `VoiceSessionCoordinator.swift:832-863`.
+
+<Info>
+These suppression windows are **adaptive**: they're automatically tuned based on your echo cancellation mode.
+</Info>
+
+## Interruption Race Conditions
+
+Barge-in involves **precise timing** between client playback state and server conversation state. Race conditions can occur:
+
+### 1. Truncate-After-Completion
+
+You interrupt just as the assistant finishes speaking. Your truncate request arrives after the server has already marked the response as done.
+
+**Server error:** `item_truncate_invalid_item_id` or `already shorter than`
+
+**Rubber Duck behavior:** Ignores the error (classified as benign), transitions to listening.
+
+Implemented in `VoiceSessionCoordinator.swift:1146-1165`.
+
+### 2. Double-Response Race
+
+You interrupt, but the server has already started generating a new response due to server-side VAD.
+
+**Server error:** `conversation_already_has_active_response`
+
+**Rubber Duck behavior:** Ignores the error (the server will handle the conflict), transitions to listening.
+
+### 3. Cancel-After-Abort
+
+You send a cancel request, but the server has already aborted the response due to a previous truncate.
+
+**Server error:** `response_cancel_not_active`
+
+**Rubber Duck behavior:** Ignores the error, transitions to listening.
+
+All benign race errors are logged as `logInfo` (not `logError`) to reduce noise.
+
+<Tip>
+If you see "Ignoring benign interruption race error" in the logs, this is **normal** and does not indicate a problem.
+</Tip>
+
+## Debugging Barge-In Issues
+
+### Barge-In Not Triggering
+
+**Symptoms:** You speak during playback, but the assistant doesn't stop.
+
+**Possible causes:**
+
+1. **Echo**: Your voice is being masked by echo. Check if AEC is active (`duck doctor`).
+2. **Confirmation delay too long**: Reduce the confirmation delay in Settings.
+3. **Microphone muted**: Check if software muting is active (without AEC, input is muted during playback).
+4. **VAD suppression window**: You spoke too soon after the last audio delta (< 220ms). Wait slightly longer.
+
+**Debugging:**
+
+```bash
+# Check if hardware AEC is active
+duck doctor
+
+# Enable verbose logging (Swift app)
+log stream --predicate 'subsystem == "co.blode.rubber-duck"' --level debug
+
+# Look for:
+# - "Ignoring speech_started during suppression window"
+# - "Ignoring speech_started while input is muted"
+```
+
+### False Barge-Ins (Echo Triggering Interruption)
+
+**Symptoms:** The assistant stops speaking even though you didn't say anything.
+
+**Possible causes:**
+
+1. **Echo bleed**: The assistant's voice is reaching the microphone and triggering VAD.
+2. **Confirmation delay too short**: Increase the confirmation delay in Settings.
+3. **Background noise**: Ambient sound is triggering VAD during playback.
+
+**Solutions:**
+
+1. **Use hardware AEC**: Check `duck doctor` — if hardware AEC is not active, try disconnecting external audio devices.
+2. **Increase confirmation delay**: Go to Settings > Voice and increase the barge-in confirmation delay to 500ms or more.
+3. **Use a directional microphone**: Reduce room echo with acoustic treatment or a cardioid mic.
+
+### Barge-In Position Incorrect
+
+**Symptoms:** The conversation tree shows text you didn't hear (the truncation point is too late).
+
+**Possible causes:**
+
+1. **Playback buffer lag**: The playback position is ahead of what you actually heard.
+2. **Audio device latency**: External speakers/headphones introduce output delay.
+
+**Solutions:**
+
+This is rare — if it happens, file a bug report with your audio device configuration.
+
+## CLI Visibility
+
+When barge-in occurs, the CLI prints a line indicating the action taken:
+
+```
+[system] Barge-in: response truncated (abort mode)
+```
+
+or
+
+```
+[system] Barge-in: steering message queued
+```
+
+You can grep for `Barge-in` in the CLI output to see all interruptions in a session.
+
+## Related
+
+- [Voice Interface](/features/voice-interface) - How voice activation and speech detection work
+- [Sessions](/features/sessions) - Managing multiple sessions and background runs
+- [CLI Commands](/features/cli-commands) - Using the CLI alongside voice

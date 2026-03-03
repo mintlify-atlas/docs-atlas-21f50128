@@ -1,0 +1,352 @@
+---
+title: CLI Commands
+description: Overview of the duck CLI - attach workspaces, send messages, manage sessions, and check system health
+---
+
+The `duck` CLI is your terminal interface to Rubber Duck. It attaches workspaces, streams conversation events, sends text messages, and manages sessions.
+
+## Overview
+
+Rubber Duck uses a **client-daemon architecture**:
+
+- The **daemon** (`duck-daemon`) runs in the background, manages Pi subprocesses, and coordinates sessions
+- The **CLI** (`duck`) is a lightweight client that communicates with the daemon over a Unix socket
+
+```
+Terminal (duck) ──► daemon.sock ──► Daemon ──► Pi (RPC subprocess)
+                                      │
+Rubber Duck.app ────────────────────┘
+```
+
+Both the voice interface and the CLI talk to the same daemon, so they share sessions, conversation history, and workspace state.
+
+<Info>
+The daemon starts automatically when you run any `duck` command. It listens on a Unix socket at `~/Library/Application Support/RubberDuck/daemon.sock`.
+</Info>
+
+## Core Commands
+
+### `duck [path]`
+
+**Attach a workspace and stream events.**
+
+This is the **default command** — just run `duck` in any directory:
+
+```bash
+cd ~/my-project
+duck
+```
+
+What it does:
+
+1. Attaches the current directory (or `[path]` if provided) as a workspace
+2. Creates or resumes the default session for that workspace
+3. Sets the session as the **active voice session** (so Option+D talks to this session)
+4. Starts streaming all conversation events to your terminal
+
+You'll see:
+
+- User utterances (voice transcripts and text messages)
+- Assistant responses (text and audio transcripts)
+- Tool calls with streaming output
+- Session state changes
+
+<Note>
+The terminal stays open and streams events in real time. Press **Ctrl+C** to stop following, but the session continues running in the background.
+</Note>
+
+**Examples:**
+
+```bash
+# Attach current directory
+duck
+
+# Attach a specific directory
+duck ~/projects/my-app
+
+# Attach and follow a git repository
+duck $(git rev-parse --show-toplevel)
+```
+
+### `duck say <message...>`
+
+**Send a text message to the active session.**
+
+This is equivalent to speaking via the voice interface, but using text input:
+
+```bash
+duck say "list all TypeScript files in src/"
+```
+
+What it does:
+
+1. Sends the message to the active session's Pi subprocess
+2. Waits for the agent to respond (tool calls, streaming output, etc.)
+3. Prints all events to the terminal
+4. Exits when the agent finishes (or after 10 minutes)
+
+<Tip>
+`duck say` is great for **scripting** or when you want to send a quick message without using voice. It automatically attaches the current workspace if needed.
+</Tip>
+
+**Options:**
+
+- `--json`: Output raw NDJSON events instead of pretty-printed text
+- `--session <id>`: Send to a specific session (by name or ID prefix)
+- `--show-thinking`: Display model thinking blocks (hidden by default)
+
+**Examples:**
+
+```bash
+# Send a prompt
+duck say "add error handling to the login function"
+
+# Send a multi-word prompt (quotes optional)
+duck say what does the parse function do
+
+# Output as JSON for scripting
+duck say "run tests" --json
+
+# Send to a specific session
+duck say "status update" --session debug-session
+```
+
+### `duck sessions`
+
+**List all sessions for the current workspace** (or all workspaces with `--all`).
+
+Output includes:
+
+- Session name and ID
+- Workspace path
+- Status (running or stopped)
+- Last active timestamp
+- Active session indicator (✔)
+
+```bash
+duck sessions
+```
+
+**Example output:**
+
+```
+SESSION        WORKSPACE           STATUS      LAST ACTIVE
+main ✔        ~/projects/app      running     2 min ago
+debug          ~/projects/app      stopped     1 hour ago
+```
+
+**Options:**
+
+- `--all`: Show sessions across all workspaces
+- `--json`: Output as JSON array
+
+<Info>
+The **active session** (marked with ✔) is the one that receives new voice utterances when you press Option+D.
+</Info>
+
+### `duck doctor`
+
+**Check system health and dependencies.**
+
+Runs diagnostics for:
+
+- **Daemon**: Is the daemon running and reachable?
+- **Pi binary**: Is Pi installed and executable?
+- **API keys**: Are required environment variables set (e.g., `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`)?
+- **Microphone**: Does Rubber Duck have microphone permissions?
+- **Workspace**: Is the current directory a valid workspace?
+
+```bash
+duck doctor
+```
+
+**Example output:**
+
+```
+◆ duck doctor
+│
+✔ daemon        Running (PID 12345)
+✔ pi            Found at /usr/local/bin/pi (v0.5.0)
+✔ api-keys      OPENAI_API_KEY is set
+✔ microphone    Permission granted
+⚠ workspace     Not attached. Run `duck` to start.
+│
+└ Ready with warnings.
+```
+
+<Tip>
+Run `duck doctor` after installation or if you're troubleshooting connection issues.
+</Tip>
+
+## Removed Commands
+
+Previous versions of Rubber Duck CLI had separate commands for `attach`, `follow`, `new`, `use`, `abort`, and `export`. These have been streamlined:
+
+- **`duck attach` + `duck follow`** → `duck [path]` (attach and stream in one command)
+- **`duck new`** → Sessions are created automatically when needed
+- **`duck use`** → The active session is set automatically by `duck [path]`
+- **`duck abort`** → Barge-in via voice (Option+D toggles off) or Ctrl+C in the terminal
+- **`duck export`** → Coming soon (use Pi RPC `export_html` method directly for now)
+
+If you try to run a removed command, the CLI will print a helpful migration message.
+
+## Output Formats
+
+### Text (Default)
+
+Pretty-printed, color-coded output with prefixes:
+
+```
+[user]       list all TypeScript files
+[assistant]  Here are the TypeScript files in src/:
+[tool:bash]  find src -name "*.ts"
+  src/index.ts
+  src/utils.ts
+  src/types.ts
+[assistant]  Found 3 TypeScript files.
+```
+
+**Color coding:**
+
+- **Cyan**: User messages
+- **Green**: Assistant responses
+- **Yellow**: Tool calls and arguments
+- **Dim**: Tool output and metadata
+
+Colors are automatically disabled if `NO_COLOR` is set or `stdout` is not a TTY.
+
+### JSON (NDJSON)
+
+Raw event stream as newline-delimited JSON. Useful for scripting or integrating with other tools:
+
+```bash
+duck say "list files" --json
+```
+
+**Example events:**
+
+```json
+{"type":"message_update","assistantMessageEvent":{"type":"text_delta","text":"Here are"}}
+{"type":"tool_execution_start","toolExecution":{"tool":"bash","args":{"command":"ls"}}}
+{"type":"tool_execution_update","toolExecution":{"output":"file1.txt\n"}}
+{"type":"tool_execution_end","toolExecution":{"exitCode":0}}
+{"type":"agent_end"}
+```
+
+See [`types.ts`](https://github.com/mblode/rubber-duck/blob/main/cli/src/types.ts) for the full event schema.
+
+## Extension UI Requests
+
+When Pi needs interactive input (e.g., from an extension or skill), the CLI automatically handles it using **[@clack/prompts](https://github.com/natemoo-re/clack)**:
+
+```bash
+duck say "install @example/skill"
+```
+
+**Example interaction:**
+
+```
+◆ Confirm installation of @example/skill?
+│ ○ Yes / ● No
+```
+
+The CLI sends the response back to the daemon via `extension_ui_response`, and the agent continues.
+
+<Note>
+Extension UI prompts only appear in **interactive mode** (when `stdin` and `stdout` are both TTYs). In non-interactive mode (e.g., CI), prompts are skipped.
+</Note>
+
+## Environment Variables
+
+### `RUBBER_DUCK_PI_BINARY`
+
+Override the Pi binary path. By default, the CLI looks for:
+
+1. `RUBBER_DUCK_PI_BINARY` (if set)
+2. `node_modules/.bin/pi` (local install)
+3. `pi` on `PATH`
+
+```bash
+export RUBBER_DUCK_PI_BINARY=/usr/local/bin/pi
+duck
+```
+
+### `RUBBER_DUCK_PI_MODEL`
+
+Set the default model for Pi sessions. Defaults to `gpt-4o-mini` when `OPENAI_API_KEY` is set.
+
+```bash
+export RUBBER_DUCK_PI_MODEL=gpt-4o
+duck
+```
+
+### `RUBBER_DUCK_PI_THINKING`
+
+Set the thinking level for Pi. Defaults to `off` for speed. Options: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`.
+
+```bash
+export RUBBER_DUCK_PI_THINKING=medium
+duck say "explain the architecture"
+```
+
+### `NO_COLOR`
+
+Disable all color output (follows the [NO_COLOR standard](https://no-color.org/)).
+
+```bash
+NO_COLOR=1 duck
+```
+
+## Daemon Management
+
+The daemon starts automatically when you run any `duck` command. It runs in the background and persists across terminal sessions.
+
+### Daemon Files
+
+All daemon runtime files are stored in `~/Library/Application Support/RubberDuck/`:
+
+- `daemon.sock` - Unix socket for IPC (or `$TMPDIR/rubber-duck-<hash>.sock` if path is too long)
+- `duck-daemon.pid` - Process ID of the running daemon
+- `duck-daemon.log` - Lifecycle logs (start, stop, crashes)
+- `metadata.json` - Workspace and session metadata (atomically updated)
+- `config.json` - Runtime configuration (model, thinking level, etc.)
+- `pi-sessions/` - Per-session JSONL history files
+
+### Manual Daemon Control
+
+You can manually start, stop, or restart the daemon:
+
+```bash
+# Start daemon in foreground (for debugging)
+node /path/to/duck-daemon.js --verbose
+
+# Stop daemon
+pkill duck-daemon
+
+# Restart daemon (stop + next duck command auto-starts)
+pkill duck-daemon && duck
+```
+
+<Warning>
+Stopping the daemon kills all running Pi subprocesses. Sessions are persisted and can be resumed, but active tool executions will be aborted.
+</Warning>
+
+## Socket Path Fallback
+
+Unix sockets have a maximum path length (104 bytes on macOS). If the default path `~/Library/Application Support/RubberDuck/daemon.sock` exceeds this limit, the daemon and CLI automatically fall back to:
+
+```
+$TMPDIR/rubber-duck-<hash>.sock
+```
+
+The hash is deterministic (based on the app support directory path) so all clients connect to the same socket.
+
+<Info>
+This fallback is transparent — you don't need to do anything. Both the daemon and CLI will use the same logic to determine the socket path.
+</Info>
+
+## Related
+
+- [Sessions](/features/sessions) - Multi-session workflows and workspace management
+- [Voice Interface](/features/voice-interface) - Using the voice interface alongside the CLI
+- [Interruptions](/features/interruptions) - Aborting or steering agent runs

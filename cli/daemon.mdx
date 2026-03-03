@@ -1,0 +1,412 @@
+---
+title: Daemon Architecture
+description: Understanding the Rubber Duck daemon process, socket communication, and runtime files
+---
+
+## Overview
+
+The Rubber Duck CLI operates through a persistent daemon process that manages Pi RPC sessions and coordinates between the terminal client, voice app, and AI backend.
+
+```
+Terminal CLI ──┐
+               ├──► Daemon ──► Pi Process (per session)
+Voice App ─────┘      │
+                      ├──► MetadataStore
+                      └──► EventBus
+```
+
+## Auto-Start Behavior
+
+The daemon starts automatically when you run any `duck` command:
+
+1. **Socket check**: CLI attempts to connect to the Unix socket
+2. **PID validation**: If socket missing, checks PID file for running daemon
+3. **Spawn**: If not running, spawns detached daemon process
+4. **Polling**: Waits up to 5 seconds with exponential backoff (100ms, 200ms, 400ms...)
+5. **Connect**: Once socket is ready, command proceeds
+
+You never need to manually start the daemon.
+
+## Socket Location
+
+The daemon communicates via Unix domain socket.
+
+### Default Path
+
+```
+~/Library/Application Support/RubberDuck/daemon.sock
+```
+
+### Fallback Path
+
+If the default path exceeds Unix socket length limits (~104 characters), the daemon and CLI automatically fall back to:
+
+```
+$TMPDIR/rubber-duck-<hash>.sock
+```
+
+The hash is derived from the app support directory path to ensure consistency across invocations.
+
+### Finding the Socket
+
+You can programmatically resolve the socket path:
+
+```typescript
+import { SOCKET_PATH } from "rubber-duck";
+
+console.log(SOCKET_PATH);
+```
+
+Or check the PID file:
+
+```bash
+cat ~/Library/Application\ Support/RubberDuck/duck-daemon.pid
+```
+
+## Runtime Files
+
+All daemon state lives under:
+
+```
+~/Library/Application Support/RubberDuck/
+```
+
+### File Structure
+
+<ParamField path="metadata.json" type="file">
+  Workspace and session state. Contains workspace paths, session IDs, names, and last active timestamps. Written atomically via temp file + rename.
+</ParamField>
+
+<ParamField path="config.json" type="file">
+  Daemon configuration. Model selection, thinking level, and Pi binary path.
+</ParamField>
+
+<ParamField path="duck-daemon.log" type="file">
+  Daemon lifecycle log. Startup, shutdown, errors, and health check events. Appended on each daemon invocation.
+</ParamField>
+
+<ParamField path="duck-daemon.pid" type="file">
+  Process ID of the running daemon. Used to detect stale sockets and prevent duplicate daemon processes.
+</ParamField>
+
+<ParamField path="daemon.sock" type="socket">
+  Unix domain socket for IPC. NDJSON protocol for requests, responses, and events.
+</ParamField>
+
+<ParamField path="pi-sessions/" type="directory">
+  Per-session Pi conversation files. Each session has its own `.pi` file containing the full conversation history.
+</ParamField>
+
+### Example Layout
+
+```
+~/Library/Application Support/RubberDuck/
+├── metadata.json
+├── config.json
+├── duck-daemon.log
+├── duck-daemon.pid
+├── daemon.sock
+└── pi-sessions/
+    ├── session-abc123.pi
+    └── session-xyz789.pi
+```
+
+## IPC Protocol
+
+The daemon uses NDJSON (newline-delimited JSON) over the Unix socket.
+
+### Request Format
+
+```json
+{"id":"req-123","method":"say","params":{"message":"hello"}}
+```
+
+<ParamField path="id" type="string" required>
+  Unique request ID for correlation (UUID or sequential)
+</ParamField>
+
+<ParamField path="method" type="string" required>
+  Daemon method name (see Methods below)
+</ParamField>
+
+<ParamField path="params" type="object">
+  Method-specific parameters
+</ParamField>
+
+### Response Format
+
+```json
+{"id":"req-123","ok":true,"data":{"sessionId":"session-abc"}}
+```
+
+<ParamField path="id" type="string" required>
+  Matches the request ID
+</ParamField>
+
+<ParamField path="ok" type="boolean" required>
+  Success indicator (true/false)
+</ParamField>
+
+<ParamField path="data" type="object">
+  Response payload (when ok=true)
+</ParamField>
+
+<ParamField path="error" type="string">
+  Error message (when ok=false)
+</ParamField>
+
+### Event Format
+
+Events are pushed to subscribed clients (no request ID):
+
+```json
+{"event":"pi","sessionId":"session-abc","data":{"type":"message_update","assistantMessageEvent":{"type":"text_delta","text":"Hello"}}}
+```
+
+<ParamField path="event" type="string" required>
+  Event type: `pi` (Pi protocol event) or `app_history` (voice history)
+</ParamField>
+
+<ParamField path="sessionId" type="string" required>
+  Session that emitted the event
+</ParamField>
+
+<ParamField path="data" type="object" required>
+  Event payload (PiEvent for `pi` events)
+</ParamField>
+
+## Daemon Methods
+
+### Session Management
+
+**attach** - Create or resume a workspace session
+```json
+{"method":"attach","params":{"path":"/Users/alice/projects/app"}}
+```
+
+**follow** - Subscribe to session events
+```json
+{"method":"follow","params":{"sessionId":"session-abc","skipHistory":false}}
+```
+
+**unfollow** - Unsubscribe from session events
+```json
+{"method":"unfollow","params":{"sessionId":"session-abc"}}
+```
+
+**sessions** - List all sessions
+```json
+{"method":"sessions","params":{"all":true}}
+```
+
+**say** - Send message to session
+```json
+{"method":"say","params":{"message":"run tests","sessionId":"session-abc"}}
+```
+
+**abort** - Cancel running agent turn
+```json
+{"method":"abort","params":{"sessionId":"session-abc"}}
+```
+
+### Voice App Integration
+
+**voice_connect** - Register voice app client
+```json
+{"method":"voice_connect","params":{}}
+```
+
+**voice_tool_call** - Execute tool from voice app
+```json
+{"method":"voice_tool_call","params":{"name":"read_file","arguments":{"path":"/src/app.ts"},"callId":"call-123","sessionId":"session-abc"}}
+```
+
+**voice_state** - Get current voice session state
+```json
+{"method":"voice_state","params":{}}
+```
+
+### Diagnostics
+
+**ping** - Health check
+```json
+{"method":"ping","params":{}}
+```
+Response: `{"ok":true,"data":{"pong":true}}`
+
+**doctor** - Run health checks
+```json
+{"method":"doctor","params":{}}
+```
+Returns daemon-side health check results.
+
+**get_state** - Get session state
+```json
+{"method":"get_state","params":{"sessionId":"session-abc"}}
+```
+
+### UI Extension
+
+**extension_ui_response** - Respond to interactive prompt
+```json
+{"method":"extension_ui_response","params":{"id":"ui-req-123","response":{"confirmed":true}}}
+```
+
+## Process Management
+
+### Daemon Process
+
+The daemon runs as a detached background process:
+
+```bash
+# Check if daemon is running
+ps aux | grep duck-daemon
+
+# View daemon logs
+tail -f ~/Library/Application\ Support/RubberDuck/duck-daemon.log
+
+# Kill daemon manually (will auto-restart on next `duck` command)
+kill $(cat ~/Library/Application\ Support/RubberDuck/duck-daemon.pid)
+```
+
+### Pi Subprocesses
+
+The daemon spawns one Pi RPC subprocess per active session:
+
+```bash
+# List Pi processes
+ps aux | grep "pi --mode rpc"
+```
+
+Each Pi process:
+- Runs `pi --mode rpc --model <model>`
+- Communicates via stdin/stdout NDJSON
+- Maintains a single session conversation
+- Is killed when the session ends or daemon shuts down
+
+### Health Monitoring
+
+The daemon performs periodic health checks every 30 seconds:
+
+- **Pi liveness**: Verifies each Pi subprocess is responsive
+- **Socket cleanup**: Removes disconnected clients
+- **Session pruning**: Removes inactive sessions (configurable)
+
+Unresponsive Pi processes are automatically restarted.
+
+## Running the Daemon Manually
+
+For debugging, you can run the daemon in the foreground:
+
+```bash
+# From source
+cd cli
+node dist/daemon.js --verbose
+
+# Via installed binary (symlink or --daemon flag)
+duck-daemon --verbose
+# OR
+duck --daemon --verbose
+```
+
+Foreground mode:
+- Logs to stdout instead of `duck-daemon.log`
+- `--verbose` flag shows all Pi events
+- Ctrl+C to stop
+
+## Single-Binary Mode
+
+The `duck` binary acts as both CLI and daemon depending on how it's invoked:
+
+**CLI mode** (default):
+```bash
+duck say "hello"
+```
+
+**Daemon mode** (via symlink or flag):
+```bash
+duck-daemon         # Symlink triggers daemon mode
+duck --daemon       # Flag triggers daemon mode
+```
+
+The macOS app installer creates a `duck-daemon` symlink so the Swift app can launch the daemon using the same binary.
+
+## Programmatic Usage
+
+Connect to the daemon from Node.js:
+
+```typescript
+import { DaemonClient } from "rubber-duck";
+
+const client = await DaemonClient.connect();
+
+// Send a request
+const response = await client.request("attach", {
+  path: "/Users/alice/project",
+});
+
+if (response.ok) {
+  const { session } = response.data;
+  console.log("Session:", session.id);
+}
+
+// Listen for events
+client.onEvent((event) => {
+  if (event.event === "pi") {
+    console.log("Pi event:", event.data);
+  }
+});
+
+// Clean up
+client.close();
+```
+
+## Troubleshooting
+
+### Daemon won't start
+
+```bash
+# Check for stale PID file
+cat ~/Library/Application\ Support/RubberDuck/duck-daemon.pid
+ps -p <pid>  # If process doesn't exist, remove PID file
+
+# Check socket permissions
+ls -la ~/Library/Application\ Support/RubberDuck/daemon.sock
+
+# Remove stale socket
+rm ~/Library/Application\ Support/RubberDuck/daemon.sock
+
+# Try again
+duck doctor
+```
+
+### Socket connection timeout
+
+If the socket path is too long, ensure the fallback path is writable:
+
+```bash
+echo $TMPDIR
+ls -la $TMPDIR/rubber-duck-*.sock
+```
+
+### High memory usage
+
+Each Pi subprocess can consume significant memory. Check active sessions:
+
+```bash
+duck sessions --all
+```
+
+Kill idle sessions by stopping the daemon:
+
+```bash
+kill $(cat ~/Library/Application\ Support/RubberDuck/duck-daemon.pid)
+```
+
+### Logs missing events
+
+Daemon log shows lifecycle events only. For Pi event logs, run in foreground:
+
+```bash
+duck --daemon --verbose
+```

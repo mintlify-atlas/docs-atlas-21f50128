@@ -1,80 +1,242 @@
 ---
-title: "Quickstart"
-description: "Start building awesome documentation in minutes"
+title: Quickstart
+description: Get up and running with Rubber Duck in minutes. Attach a workspace, start a voice session, and begin coding with voice.
 ---
 
-## Get started in three steps
+# Quickstart
 
-Get your documentation site running locally and make your first customization.
-
-### Step 1: Set up your local environment
-
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
-    
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
-    
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
-
-### Step 2: Deploy your changes
-
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
-    
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
-
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
-
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
-
-### Step 3: Go live
-
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
-
-## Next steps
-
-Now that you have your docs running, explore these key features:
-
-<CardGroup cols={2}>
-
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
-
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
-
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
-
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
-
-</CardGroup>
+This guide will get you from installation to your first voice coding session in minutes.
 
 <Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
+  Make sure you've completed [Installation](/installation) before starting this guide.
 </Note>
+
+## Quick Start in 4 Steps
+
+<Steps>
+  <Step title="Attach a workspace">
+    Navigate to your project directory and attach it:
+    
+    ```bash
+    cd ~/projects/myapp
+    duck .
+    ```
+    
+    This command:
+    - Starts the daemon if needed
+    - Registers the workspace
+    - Creates or resumes a session for this repo
+    - Streams live events to your terminal
+    
+    You'll see output like:
+    ```
+    Attached: /Users/you/projects/myapp
+    Session: myapp-1
+    Streaming events...
+    ```
+  </Step>
+  
+  <Step title="Start a voice session">
+    With the terminal running `duck .`, press and hold the hotkey:
+    
+    **`Option+D`**
+    
+    You'll see a recording indicator in the menu bar and your terminal.
+  </Step>
+  
+  <Step title="Speak your request">
+    While holding `Option+D`, speak naturally:
+    
+    - "List all TypeScript files in the src directory"
+    - "Where is the authentication logic defined?"
+    - "Run the test suite and tell me what failed"
+    
+    Release the key when done speaking.
+  </Step>
+  
+  <Step title="Watch and listen">
+    The agent will:
+    - Show your transcribed speech in the terminal
+    - Execute tools (search, read files, run commands)
+    - Stream all output to your terminal in real-time
+    - Speak the response back to you
+    
+    All file reads, command executions, and edits are visible in your terminal.
+  </Step>
+</Steps>
+
+## Your First Interaction
+
+Here's what a typical session looks like:
+
+<CodeGroup>
+```bash Terminal Output
+$ duck .
+Attached: /Users/you/projects/myapp
+Session: myapp-1
+Streaming events...
+
+[user] List all TypeScript files in the src directory
+
+[tool:bash] ls src/**/*.ts
+  src/index.ts
+  src/utils/helper.ts
+  src/components/Button.ts
+  src/services/api.ts
+
+[assistant] I found 4 TypeScript files in the src directory: 
+index.ts, helper.ts, Button.ts, and api.ts. 
+Would you like me to look at any of these?
+```
+
+```bash Follow-up Request
+[user] Show me the api.ts file
+
+[tool:read_file] src/services/api.ts
+  1 | export async function fetchUser(id: string) {
+  2 |   const response = await fetch(`/api/users/${id}`);
+  3 |   return response.json();
+  4 | }
+
+[assistant] The api.ts file contains a fetchUser function 
+that makes an HTTP request to get user data by ID.
+```
+</CodeGroup>
+
+## Interrupting the Agent
+
+You can interrupt at any time:
+
+<Steps>
+  <Step title="Start speaking">
+    While the agent is speaking or working, just start talking. The agent will:
+    - Stop speaking immediately
+    - Abort the current operation (if auto-abort is enabled)
+    - Listen to your new request
+  </Step>
+  
+  <Step title="The terminal shows what happened">
+    ```bash
+    [system] Interrupted by user
+    [system] Run aborted
+    
+    [user] Actually, show me the tests instead
+    ```
+  </Step>
+</Steps>
+
+<Note>
+  Auto-abort on barge-in is enabled by default. You can change this in Settings to use "steering" mode instead, which queues your message for after the current tool finishes.
+</Note>
+
+## Common Commands
+
+Here are some useful commands to try:
+
+### Attach and Follow
+
+```bash
+# Attach current directory and stream events
+duck .
+
+# Attach a specific directory
+duck ~/projects/myapp
+```
+
+### Send Typed Messages
+
+You can also send typed messages without using voice:
+
+```bash
+# Send a message to the active session
+duck say "fix the auth bug"
+
+# The output streams to your terminal just like voice
+```
+
+### Session Management
+
+```bash
+# List sessions for the current workspace
+duck sessions
+
+# List all sessions across all workspaces
+duck sessions --all
+```
+
+### System Health
+
+```bash
+# Check that everything is working
+duck doctor
+```
+
+## Understanding the Terminal Output
+
+The terminal shows everything that happens:
+
+| Prefix | Meaning |
+|--------|----------|
+| `[user]` | Your transcribed speech or typed message |
+| `[assistant]` | The agent's response (also spoken to you) |
+| `[tool:bash]` | Bash command being executed |
+| `[tool:read_file]` | File being read |
+| `[tool:edit_file]` | File being edited |
+| `[tool:grep_search]` | Search being performed |
+| `[system]` | System messages (interruptions, session changes) |
+
+<Warning>
+  All bash commands and file edits are executed in your workspace. Review the output carefully, especially for write operations.
+</Warning>
+
+## Keyboard Shortcuts
+
+| Shortcut | Action |
+|----------|--------|
+| `Option+D` | Press and hold to activate voice agent |
+| `Option+Shift+D` | Open Settings window |
+| `Ctrl+C` (in terminal) | Stop following the session stream |
+
+## Tips for Effective Voice Coding
+
+<AccordionGroup>
+  <Accordion title="Be specific about file paths">
+    Instead of "update the config", say "update the webpack.config.js file in the root directory".
+  </Accordion>
+  
+  <Accordion title="Break down complex tasks">
+    Voice works best for focused requests. Break large refactors into smaller steps.
+  </Accordion>
+  
+  <Accordion title="Use the terminal as your source of truth">
+    The spoken response is a summary. The terminal has the full details, diffs, and output.
+  </Accordion>
+  
+  <Accordion title="Interrupt freely">
+    If the agent goes off track, just start speaking. Interruptions are instant.
+  </Accordion>
+  
+  <Accordion title="Review before committing">
+    When the agent makes edits, review the diffs in your terminal before committing changes.
+  </Accordion>
+</AccordionGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="CLI Reference" icon="terminal" href="/cli-reference">
+    Learn all available `duck` commands and options
+  </Card>
+  
+  <Card title="Multi-Session Workflows" icon="layer-group" href="/sessions">
+    Work with multiple sessions across different repos
+  </Card>
+  
+  <Card title="Voice Configuration" icon="microphone" href="/voice-settings">
+    Customize voice behavior and interruption settings
+  </Card>
+  
+  <Card title="Troubleshooting" icon="wrench" href="/troubleshooting">
+    Common issues and solutions
+  </Card>
+</CardGroup>

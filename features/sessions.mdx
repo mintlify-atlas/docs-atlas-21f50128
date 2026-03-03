@@ -1,0 +1,384 @@
+---
+title: Session Management
+description: Multiple sessions per workspace, background sessions, session switching, and conversation persistence
+---
+
+Rubber Duck supports **multiple concurrent sessions** per workspace. This enables parallel workflows like debugging in one session while refactoring in another.
+
+## Session Model
+
+Each session is:
+
+- **Bound to a workspace**: A directory root (usually a git repo) attached via `duck [path]`
+- **Backed by a Pi subprocess**: One Pi process per session, running in RPC mode
+- **Persisted as JSONL**: Conversation history is stored in `~/Library/Application Support/RubberDuck/pi-sessions/<session-id>.jsonl`
+- **Resumable**: Sessions can be paused, resumed, and continued across app restarts
+
+### Workspace
+
+A **workspace** is a directory root identified by its absolute path. The workspace ID is a hash of the path.
+
+When you run:
+
+```bash
+cd ~/projects/my-app
+duck
+```
+
+Rubber Duck:
+
+1. Attaches `~/projects/my-app` as a workspace
+2. Creates or resumes the **default session** for that workspace (named after the directory)
+3. Spawns a Pi subprocess with `--workspace ~/projects/my-app`
+
+<Tip>
+Rubber Duck automatically detects the git root if you attach a subdirectory inside a repo. Use `duck .` to force the current directory.
+</Tip>
+
+### Session
+
+A **session** is a single conversation thread with its own:
+
+- **Session ID**: Unique identifier (e.g., `duck-1a2b3c4d`)
+- **Session name**: Human-readable label (defaults to workspace directory name)
+- **Conversation history**: JSONL file with user messages, assistant responses, tool calls, and metadata
+- **Pi subprocess**: One running Pi process per active session
+
+Sessions are created automatically when you attach a workspace. You can also create additional sessions for parallel workflows.
+
+## Multiple Sessions Per Workspace
+
+You can run **multiple sessions** in the same workspace for different tasks:
+
+```bash
+# Terminal 1: Debug test failure
+cd ~/projects/my-app
+duck
+# (Press Option+D and say "debug the login test failure")
+
+# Terminal 2: Refactor authentication module
+cd ~/projects/my-app
+duck
+# (Creates a second session, or you can rename it)
+```
+
+Each session has:
+
+- Its own Pi subprocess
+- Its own conversation history
+- Its own tool execution context
+
+Sessions can run **concurrently** — one session can execute a long-running test suite in the background while you actively develop in another.
+
+<Info>
+Sessions are independent. Tool calls in one session don't affect another session, and conversation history is isolated.
+</Info>
+
+## Active Voice Session
+
+The **active voice session** is the session that receives new voice utterances when you press **Option+D**.
+
+Rubber Duck automatically sets the active session when you run `duck [path]`:
+
+- If the workspace has one session, that session becomes active
+- If the workspace has multiple sessions, the most recently used session becomes active
+- If you attach a new workspace, its default session becomes active
+
+You can see the active session in:
+
+- The **menu bar popover** (Rubber Duck.app)
+- The **terminal output** when you run `duck sessions`
+
+<Note>
+Only **one session** can be the active voice session at a time. Background sessions can run concurrently, but they won't receive voice input.
+</Note>
+
+## Switching Sessions
+
+You can switch the active voice session in two ways:
+
+### 1. Via CLI
+
+Run `duck [path]` in the workspace you want to switch to:
+
+```bash
+# Switch to the my-app workspace (and its default session)
+cd ~/projects/my-app
+duck
+```
+
+When the daemon receives an `attach` request, it:
+
+1. Sets the workspace's default session as the active voice session
+2. Notifies Rubber Duck.app via `voice_session_changed` push event
+3. The app updates the menu bar popover and internal state
+
+The switch is **instant** (no polling delay).
+
+### 2. Via Menu Bar Popover
+
+Click the Rubber Duck menu bar icon and select a session from the **"Switch Session"** list.
+
+The popover shows:
+
+- Active workspace path
+- Active session name
+- All sessions for that workspace
+
+<Tip>
+The menu bar popover is a quick way to see which session is active and switch between sessions in the same workspace.
+</Tip>
+
+## Session Persistence
+
+Conversation history is **automatically saved** to disk as the session runs.
+
+Each session's history is stored as a JSONL file:
+
+```
+~/Library/Application Support/RubberDuck/pi-sessions/<session-id>.jsonl
+```
+
+The history includes:
+
+- User messages (voice transcripts and text input)
+- Assistant responses (text and audio transcripts)
+- Tool calls and results
+- Metadata (timestamps, session ID, event types)
+
+Implemented in `ConversationHistory.swift` and `VoiceSessionCoordinator.swift:639-658`.
+
+### Resuming Sessions
+
+When you attach a workspace, Rubber Duck checks if a session already exists:
+
+- If yes, the session is **resumed** from its persisted state
+- If no, a new session is created
+
+The Pi subprocess reads the session history from the JSONL file on startup, so the model has full conversation context.
+
+<Info>
+Sessions persist across app restarts, daemon restarts, and reboots. You never lose conversation context.
+</Info>
+
+## Background Sessions
+
+Sessions can run in the **background** while you work in another session.
+
+For example:
+
+1. Start a long-running test suite in session A:
+   ```bash
+   duck say "run the full test suite and report any failures"
+   ```
+
+2. Switch to session B and continue development:
+   ```bash
+   # In another terminal
+   cd ~/projects/my-app
+   duck
+   # (Press Option+D and say "add validation to the signup form")
+   ```
+
+Session A continues running in the background. Its output streams to the terminal where you started it, but it won't speak unless you enable **"Background sessions speak"** in Settings.
+
+### Background Session Output
+
+By default, background sessions:
+
+- Stream output to the terminal where you're following them
+- Do **not** speak responses (to avoid interrupting your active session)
+- Show a **notification** when the agent finishes (macOS notification center)
+
+You can enable **"Background sessions speak"** in Settings to hear responses from background sessions.
+
+<Warning>
+Enabling "Background sessions speak" can be confusing if multiple sessions are running concurrently. The audio will overlap, and you won't know which session is speaking.
+</Warning>
+
+## Viewing All Sessions
+
+Run `duck sessions` to see all sessions for the current workspace:
+
+```bash
+duck sessions
+```
+
+**Example output:**
+
+```
+SESSION        WORKSPACE           STATUS      LAST ACTIVE
+main ✔        ~/projects/app      running     2 min ago
+debug          ~/projects/app      stopped     1 hour ago
+refactor       ~/projects/app      running     30 sec ago
+```
+
+**Columns:**
+
+- **SESSION**: Session name (with ✔ for active voice session)
+- **WORKSPACE**: Workspace path (shortened with `~`)
+- **STATUS**: `running` (Pi subprocess alive) or `stopped` (no Pi subprocess)
+- **LAST ACTIVE**: Relative timestamp of the last activity
+
+Add `--all` to see sessions across all workspaces:
+
+```bash
+duck sessions --all
+```
+
+<Tip>
+Use `--json` to get machine-readable output for scripting:
+
+```bash
+duck sessions --json | jq '.[] | select(.isActive)'
+```
+</Tip>
+
+## Session Lifecycle
+
+### 1. Creation
+
+Sessions are created automatically when you attach a workspace:
+
+```bash
+duck ~/projects/my-app
+```
+
+The daemon:
+
+1. Generates a session ID (e.g., `duck-1a2b3c4d`)
+2. Assigns a default name (workspace directory name)
+3. Creates a JSONL history file (`pi-sessions/<session-id>.jsonl`)
+4. Spawns a Pi subprocess with `--mode rpc --workspace <path>`
+5. Registers the session in `metadata.json`
+
+### 2. Active Use
+
+While the session is active:
+
+- User input (voice or text) is sent to the Pi subprocess via `prompt` RPC method
+- The Pi subprocess streams events (message deltas, tool calls, tool output) back to the daemon
+- The daemon broadcasts events to all subscribed CLI clients
+- Conversation history is appended to the JSONL file in real time
+
+### 3. Background
+
+When you switch to another session, the previous session:
+
+- Continues running if there's an active agent turn
+- Stops if the agent has finished and there's no pending work
+- Remains resumable (history is persisted)
+
+You can re-attach by running `duck [path]` in that workspace again.
+
+### 4. Cleanup
+
+The daemon periodically checks session health (every 30 seconds):
+
+- If a Pi subprocess crashes, it's removed from the active session list
+- If a session has been idle for 24 hours, it's marked as stopped (but history is preserved)
+
+You can manually stop a session by killing its Pi subprocess:
+
+```bash
+pkill -f "pi --mode rpc"
+```
+
+Or stop the daemon (which kills all sessions):
+
+```bash
+pkill duck-daemon
+```
+
+<Warning>
+Stopping a session aborts any running tool executions. The session can be resumed, but the interrupted operation won't complete.
+</Warning>
+
+## Session Metadata
+
+All session metadata is stored in:
+
+```
+~/Library/Application Support/RubberDuck/metadata.json
+```
+
+This file includes:
+
+- **Workspaces**: Map of workspace ID → path
+- **Sessions**: Map of session ID → workspace ID, name, history file path, last active timestamp
+- **Active session**: The session ID that receives voice input
+
+Updates are **atomic** (write to temp file, then rename) to prevent corruption.
+
+Implemented in `cli/src/daemon/metadata-store.ts`.
+
+## Concurrent Sessions Across Workspaces
+
+You can run sessions in **multiple workspaces** at the same time:
+
+```bash
+# Terminal 1: Work on project A
+cd ~/projects/project-a
+duck
+
+# Terminal 2: Work on project B
+cd ~/projects/project-b
+duck
+
+# Terminal 3: Work on project C
+cd ~/projects/project-c
+duck
+```
+
+Each workspace has its own set of sessions, and all sessions can run concurrently.
+
+**Workspace isolation:**
+
+- Tool calls in project A don't affect project B
+- Each session has its own `cwd` and workspace root
+- File operations are confined to the workspace (see [Configuration](/guides/configuration))
+
+<Info>
+Rubber Duck.app shows the **active workspace path** in the menu bar popover. This is the workspace whose session will receive voice input when you press Option+D.
+</Info>
+
+## Session Names
+
+By default, sessions are named after the workspace directory:
+
+```
+~/projects/my-app → Session name: "my-app"
+```
+
+You can manually rename a session by editing `metadata.json` (or via a future `duck rename` command).
+
+<Tip>
+Session names are used for display in the CLI and menu bar popover. They don't affect session functionality.
+</Tip>
+
+## Advanced: Shared vs. Isolated Session Storage
+
+By default, Rubber Duck stores Pi sessions in:
+
+```
+~/Library/Application Support/RubberDuck/pi-sessions/
+```
+
+This is **isolated** from Pi's global session storage (`~/.pi/sessions/`) to avoid interfering with standalone Pi usage.
+
+You can enable **"Use global Pi sessions"** in Settings (advanced) to share session storage with Pi. This allows you to:
+
+- Resume Rubber Duck sessions in standalone Pi (and vice versa)
+- Use Pi's session branching and forking features
+
+Implemented via Pi's `--session-dir` flag.
+
+<Warning>
+Enabling global session storage can cause conflicts if you use Pi directly. Only enable this if you understand Pi's session model.
+</Warning>
+
+## Related
+
+- [CLI Commands](/features/cli-commands) - Attaching workspaces and managing sessions via CLI
+- [Voice Interface](/features/voice-interface) - Using voice with multiple sessions
+- [Architecture](/architecture/overview) - How the daemon, Pi, and app coordinate sessions

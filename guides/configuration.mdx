@@ -1,0 +1,304 @@
+---
+title: Configuration
+description: Configure Rubber Duck settings including safe mode, auto-abort behavior, session storage, and API keys.
+---
+
+Rubber Duck provides several configuration options to customize your workflow and control safety settings.
+
+## Application Settings
+
+Access settings via:
+- Menu bar icon → **Settings**
+- Global hotkey: `Option+Shift+D`
+
+## API Key Configuration
+
+Rubber Duck requires an OpenAI API key for the Realtime API and Pi agent.
+
+<Steps>
+  <Step title="Get an API key">
+    Visit [platform.openai.com/api-keys](https://platform.openai.com/api-keys) to create an API key.
+  </Step>
+
+  <Step title="Enter the key in Settings">
+    Open Settings and paste your API key in the "OpenAI API Key" field. 
+    
+    The key is stored securely in the macOS Keychain, never in plain text files.
+  </Step>
+
+  <Step title="Verify configuration">
+    Run the health check:
+    
+    ```bash
+    duck doctor
+    ```
+    
+    This verifies your API key is detected and Pi is configured correctly.
+  </Step>
+</Steps>
+
+<Warning>
+  Never commit API keys to version control or share them publicly. Rubber Duck stores your key in the macOS Keychain for security.
+</Warning>
+
+## Voice Agent Settings
+
+### Voice Selection
+
+Choose from OpenAI Realtime API voices:
+- Marin (default)
+- Cedar
+- Alloy
+- Ash
+- Ballad
+- Coral
+- Echo
+- Sage
+- Shimmer
+- Verse
+
+### Model Selection
+
+Currently supports:
+- **GPT Realtime 1.5** (gpt-realtime-1.5)
+
+Future updates may add additional models.
+
+### Auto-Abort on Barge-In
+
+**Enabled by default**. Controls what happens when you interrupt the assistant:
+
+<Accordion title="Enabled (Default Behavior)">
+  When you start speaking while the assistant is talking:
+  
+  1. TTS stops immediately
+  2. Current agent run is aborted
+  3. Running bash commands are interrupted
+  4. Your new speech starts a fresh conversation turn
+  
+  **Best for**: Quick corrections and changing direction mid-response.
+</Accordion>
+
+<Accordion title="Disabled (Steering Behavior)">
+  When you interrupt:
+  
+  1. TTS stops immediately
+  2. Your speech is sent as a steering message
+  3. Current tool completes before handling your input
+  4. Remaining planned tools are skipped
+  
+  **Best for**: Providing additional context mid-execution without aborting work.
+</Accordion>
+
+## Safe Mode
+
+Safe mode restricts the agent's tool capabilities to prevent potentially destructive operations.
+
+### When Enabled
+
+- **Write/edit tools are disabled**: Agent cannot modify files
+- **Bash commands are restricted** to a safe allowlist:
+  - `git` (read-only operations)
+  - `rg` (ripgrep)
+  - `sed`, `awk`
+  - Test runners (npm test, pytest, etc.)
+- **Read and search tools remain available**
+
+### When to Use Safe Mode
+
+<Steps>
+  <Step title="Exploring unfamiliar codebases">
+    Enable safe mode when asking questions about code you don't want modified.
+  </Step>
+
+  <Step title="Code review and analysis">
+    Safe mode is ideal for read-only analysis tasks.
+  </Step>
+
+  <Step title="Learning and experimentation">
+    Use safe mode when testing Rubber Duck on production code to prevent accidental changes.
+  </Step>
+</Steps>
+
+<Warning>
+  Safe mode is a product-level gate independent of Pi's own safety features. When enabled, write/edit requests will fail even if Pi would normally allow them.
+</Warning>
+
+## Session Storage Configuration
+
+Rubber Duck manages Pi sessions in a dedicated directory by default.
+
+### Default Storage Location
+
+Sessions are stored at:
+```
+~/Library/Application Support/RubberDuck/pi-sessions/
+```
+
+Each session is a JSONL file containing:
+- Full conversation history
+- Tool call records
+- Message tree structure (supports branching)
+
+### Global Pi Sessions (Advanced)
+
+<Accordion title="Using Global Pi Session Directory">
+  Advanced users can enable "Use global Pi sessions" to share sessions between Rubber Duck and Pi's standalone CLI.
+  
+  **Pros**:
+  - Resume conversations started in Pi CLI via Rubber Duck voice
+  - Single session history across tools
+  
+  **Cons**:
+  - Potential conflicts if both tools access the same session
+  - Sessions from Pi CLI may not be optimized for voice output
+  
+  **Location**: Pi's default session directory (typically `~/.config/pi/sessions/`)
+</Accordion>
+
+## CLI Daemon Configuration
+
+The `duck` CLI daemon has additional configuration options:
+
+### Configuration File
+
+Location: `~/Library/Application Support/RubberDuck/config.json`
+
+Automatically created on first run with defaults.
+
+### Environment Variables
+
+<Accordion title="RUBBER_DUCK_PI_MODEL">
+  Override the default Pi model:
+  
+  ```bash
+  export RUBBER_DUCK_PI_MODEL="gpt-4o"
+  duck
+  ```
+  
+  **Default**: `gpt-4o-mini` (when OPENAI_API_KEY is set)
+</Accordion>
+
+<Accordion title="RUBBER_DUCK_PI_THINKING">
+  Set Pi's thinking level (extended reasoning):
+  
+  ```bash
+  export RUBBER_DUCK_PI_THINKING="medium"
+  duck
+  ```
+  
+  **Options**: `off` (default), `minimal`, `low`, `medium`, `high`, `xhigh`
+  
+  **Note**: Higher thinking levels increase latency but may improve complex reasoning.
+</Accordion>
+
+<Accordion title="RUBBER_DUCK_PI_BINARY">
+  Override the Pi binary path:
+  
+  ```bash
+  export RUBBER_DUCK_PI_BINARY="/custom/path/to/pi"
+  duck
+  ```
+  
+  **Default resolution order**:
+  1. `RUBBER_DUCK_PI_BINARY` env var
+  2. Local `cli/node_modules/.bin/pi`
+  3. Global `pi` from PATH
+</Accordion>
+
+<Accordion title="RUBBER_DUCK_PI_PROVIDER">
+  Force a specific provider:
+  
+  ```bash
+  export RUBBER_DUCK_PI_PROVIDER="anthropic"
+  export ANTHROPIC_API_KEY="sk-ant-..."
+  duck
+  ```
+  
+  **Options**: `openai`, `anthropic`
+</Accordion>
+
+## Keyboard Shortcuts
+
+Configure global hotkeys in Settings:
+
+### Default Shortcuts
+
+- **Activate voice**: `Option+D`
+- **Open Settings**: `Option+Shift+D`
+
+Click on the shortcut recorder to change either binding.
+
+### Launch at Login
+
+Enable "Launch at login" to start Rubber Duck automatically when you log in to macOS.
+
+## Permissions
+
+### Microphone Access
+
+Required for voice input. Grant permission when prompted on first use.
+
+If permission was denied:
+1. Open Settings
+2. Click "Open Settings" next to Microphone
+3. Grant microphone access to Rubber Duck
+
+<Warning>
+  Voice features will not work without microphone permission. Check Settings → Permissions if voice isn't activating.
+</Warning>
+
+## Workspace Confinement
+
+For security, all file operations and bash commands are:
+- Executed with `cwd` set to the workspace root
+- Prevented from escaping via `..` or absolute paths
+- Restricted to the attached workspace directory
+
+This prevents accidental modifications to files outside your project.
+
+## Updates
+
+### Update Settings
+
+- **Automatically check for updates**: Checks GitHub releases periodically
+- **Automatically download updates**: Downloads but doesn't install until you approve
+
+Updates are verified against signed, notarized GitHub releases.
+
+### Manual Updates
+
+Click **Check for Updates…** in Settings or:
+
+```bash
+brew upgrade --cask rubber-duck
+```
+
+## Runtime Files
+
+All Rubber Duck runtime files are stored in:
+```
+~/Library/Application Support/RubberDuck/
+```
+
+- `metadata.json` — Workspace and session metadata
+- `config.json` — Daemon configuration
+- `duck-daemon.log` — Daemon lifecycle log
+- `duck-daemon.pid` — Running daemon process ID
+- `duck.sock` — Unix domain socket for IPC
+- `pi-sessions/` — Pi session JSONL files
+- `duck` — CLI binary (downloaded on first launch)
+
+## Viewing Logs
+
+Click **Show Logs** in Settings to open the log file in your default text editor.
+
+Logs contain:
+- Daemon start/stop events
+- Session creation/switching
+- API errors and warnings
+- Tool execution failures
+
+<Warning>
+  Log files may contain file paths and error messages from your codebase. Review before sharing logs for troubleshooting.
+</Warning>

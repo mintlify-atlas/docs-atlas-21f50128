@@ -1,0 +1,524 @@
+---
+title: 'Search Tools'
+description: 'Search code with grep_search and find_files'
+---
+
+## grep_search
+
+Search file contents using grep with pattern matching.
+
+### Parameters
+
+<ParamField path="pattern" type="string" required>
+  Regex pattern to search for. Accepts alternative keys: `query`, `regex`.
+</ParamField>
+
+<ParamField path="path" type="string">
+  Directory to search in (relative to workspace root). Defaults to workspace root. Accepts alternative keys: `directory`, `dir`.
+</ParamField>
+
+<ParamField path="include" type="string">
+  File pattern to limit search (e.g., `"*.ts"`, `"*.{js,tsx}"`).
+</ParamField>
+
+### Returns
+
+<ResponseField name="result" type="string">
+  Grep output showing matching lines with file paths and line numbers, or `"No matches found"`. Output is truncated at 100 KB.
+</ResponseField>
+
+### Behavior
+
+- Executes `grep -rn pattern path` in the workspace
+- Returns file paths relative to workspace root
+- Truncates output at 100 KB for performance
+- Returns `"No matches found"` when grep exits with code 1
+
+### Examples
+
+<CodeGroup>
+```json Search All Files
+{
+  "pattern": "executeVoiceTool"
+}
+```
+
+```json Search Specific Directory
+{
+  "pattern": "TODO",
+  "path": "src/daemon"
+}
+```
+
+```json Filter by File Extension
+{
+  "pattern": "interface.*Request",
+  "include": "*.ts"
+}
+```
+</CodeGroup>
+
+### Success Response
+
+```text
+src/daemon/request-handler.ts:102:  async voiceToolCall(
+src/daemon/request-handler.ts:575:    const result = await executeVoiceTool(
+src/daemon/voice-tools.ts:1011:export async function executeVoiceTool(
+```
+
+### No Matches Response
+
+```text
+No matches found
+```
+
+### Error Response
+
+```text
+Error: grep failed with exit code 2: Invalid regex pattern
+```
+
+### Implementation Details
+
+From `voice-tools.ts:516-577`:
+
+```typescript
+async function grepSearch(
+  args: Record<string, unknown>,
+  workspaceRoot: string
+): Promise<string> {
+  const pattern = extractStringArg(args, ["pattern", "query", "regex"]);
+  if (!pattern) {
+    return "Error: Missing required parameter 'pattern'";
+  }
+
+  let searchPath = workspaceRoot;
+  const requestedPath = extractStringArg(args, ["path", "directory", "dir"]);
+  if (requestedPath) {
+    const resolved = await resolvePath(requestedPath, workspaceRoot);
+    if (!resolved) {
+      return "Error: Path escapes workspace root";
+    }
+    searchPath = resolved;
+  }
+
+  const grepArgs = ["-rn", pattern, searchPath];
+  if (typeof args.include === "string") {
+    grepArgs.unshift(`--include=${args.include}`);
+  }
+
+  return new Promise((resolveP) => {
+    const proc = spawn("grep", grepArgs, { cwd: workspaceRoot });
+    const stdoutChunks: Buffer[] = [];
+    const stderrChunks: Buffer[] = [];
+
+    proc.stdout?.on("data", (chunk: Buffer) => stdoutChunks.push(chunk));
+    proc.stderr?.on("data", (chunk: Buffer) => stderrChunks.push(chunk));
+
+    proc.on("close", (code) => {
+      if (code === 1) {
+        return resolveP("No matches found");
+      }
+
+      const stderr = Buffer.concat(stderrChunks).toString("utf8").trim();
+      if (code !== 0) {
+        return resolveP(
+          stderr
+            ? `Error: grep failed with exit code ${code}: ${stderr}`
+            : `Error: grep failed with exit code ${code}`
+        );
+      }
+
+      const output = Buffer.concat(stdoutChunks).toString("utf8");
+      if (!output) {
+        return resolveP("No matches found");
+      }
+      resolveP(truncateOutput(output));
+    });
+
+    proc.on("error", (err) =>
+      resolveP(`Error: Failed to launch grep: ${err.message}`)
+    );
+  });
+}
+```
+
+---
+
+## find_files
+
+Find files matching a glob pattern in the workspace.
+
+### Parameters
+
+<ParamField path="pattern" type="string" default="**/*">
+  Glob pattern to match files. Accepts alternative key: `glob`. Uses [minimatch](https://github.com/isaacs/minimatch) syntax.
+</ParamField>
+
+<ParamField path="path" type="string">
+  Directory to search in (relative to workspace root). Defaults to workspace root. Accepts alternative keys: `directory`, `dir`.
+</ParamField>
+
+<ParamField path="include_hidden" type="boolean" default={false}>
+  Include dotfiles and directories in results.
+</ParamField>
+
+<ParamField path="include_directories" type="boolean" default={false}>
+  Include directories in results (default: files only).
+</ParamField>
+
+### Returns
+
+<ResponseField name="result" type="string">
+  Newline-separated list of matching file paths (relative to workspace root), sorted alphabetically. Limited to 200 results.
+</ResponseField>
+
+### Behavior
+
+- Recursively walks directory tree from search root
+- Skips `.git`, `.build`, and `node_modules` directories
+- Matches pattern against basename, workspace-relative path, and search-relative path
+- Returns paths relative to workspace root (POSIX format)
+- Truncates results at 200 files
+- Reports warnings for unreadable paths (up to 5)
+
+### Glob Pattern Examples
+
+<CodeGroup>
+```json All TypeScript Files
+{
+  "pattern": "**/*.ts"
+}
+```
+
+```json Specific Filename
+{
+  "pattern": "config.json"
+}
+```
+
+```json Multiple Extensions
+{
+  "pattern": "**/*.{ts,tsx,js,jsx}"
+}
+```
+
+```json Test Files
+{
+  "pattern": "**/*.test.ts"
+}
+```
+
+```json Nested Path Pattern
+{
+  "pattern": "src/**/daemon/*.ts"
+}
+```
+</CodeGroup>
+
+### Success Response
+
+```text
+src/daemon/event-bus.ts
+src/daemon/health.ts
+src/daemon/main.ts
+src/daemon/metadata-store.ts
+src/daemon/pi-process-manager.ts
+src/daemon/pi-process.ts
+src/daemon/request-handler.ts
+src/daemon/socket-server.ts
+src/daemon/voice-tools.ts
+```
+
+### No Matches Response
+
+```text
+No files found matching '*.py'
+```
+
+### Default Pattern Response
+
+When no pattern is provided (searches all non-hidden files):
+
+```text
+Workspace scan complete: no non-hidden files found. Try include_hidden=true to list dotfiles.
+```
+
+### Truncated Results
+
+```text
+file-001.ts
+file-002.ts
+...
+file-200.ts
+[Results truncated at 200 entries]
+```
+
+### With Warnings
+
+```text
+src/file1.ts
+src/file2.ts
+[Warning: Skipped 2 unreadable path(s)]
+[Warning] src/private (Permission denied)
+[Warning] src/symlink (ELOOP: too many symbolic links)
+```
+
+### Implementation Details
+
+From `voice-tools.ts:582-746`:
+
+```typescript
+async function findFiles(
+  args: Record<string, unknown>,
+  workspaceRoot: string
+): Promise<string> {
+  const pattern = extractStringArg(args, ["pattern", "glob"]) ?? "**/*";
+  const includeHidden = args.include_hidden === true;
+  const includeDirectories = args.include_directories === true;
+
+  let searchRoot = workspaceRoot;
+  const requestedPath = extractStringArg(args, ["path", "directory", "dir"]);
+  if (requestedPath) {
+    const resolved = await resolvePath(requestedPath, workspaceRoot);
+    if (!resolved) {
+      return "Error: Path escapes workspace root";
+    }
+    searchRoot = resolved;
+  }
+
+  if (!existsSync(searchRoot)) {
+    return `Error: Search path not found: '${requestedPath ?? "."}'`;
+  }
+
+  // ... directory walking and pattern matching ...
+
+  const sortedResults = [...results].sort((a, b) => a.localeCompare(b));
+  const outputLines = sortedResults;
+
+  if (outputLines.length >= MAX_FIND_RESULTS) {
+    outputLines.push(`[Results truncated at ${MAX_FIND_RESULTS} entries]`);
+  }
+
+  if (warnings.size > 0) {
+    outputLines.push(`[Warning: Skipped ${warnings.size} unreadable path(s)]`);
+    for (const warning of warnings) {
+      outputLines.push(`[Warning] ${warning}`);
+    }
+  }
+
+  if (outputLines.length === 0) {
+    if (pattern.trim() === "**/*") {
+      return "Workspace scan complete: no non-hidden files found. Try include_hidden=true to list dotfiles.";
+    }
+    return `No files found matching '${pattern}'`;
+  }
+
+  return outputLines.join("\n");
+}
+```
+
+### Pattern Matching Logic
+
+From `voice-tools.ts:582-612`:
+
+```typescript
+function matchesGlobPattern(
+  pattern: string,
+  baseName: string,
+  workspaceRelativePath: string,
+  searchRelativePath: string,
+  includeHidden: boolean
+): boolean {
+  const normalizedPattern = toPosixPath(pattern.trim());
+  if (!normalizedPattern) {
+    return false;
+  }
+
+  const options = {
+    dot: includeHidden,
+    nocase: true,      // Case-insensitive matching
+    matchBase: true,   // Match basename without path
+  };
+
+  const candidates = [
+    baseName,
+    workspaceRelativePath,
+    searchRelativePath,
+    `/${workspaceRelativePath}`,
+    `/${searchRelativePath}`,
+  ];
+
+  return candidates.some((candidate) =>
+    minimatch(candidate, normalizedPattern, options)
+  );
+}
+```
+
+Patterns are matched against multiple path formats for flexibility:
+
+- **Basename**: `"config.ts"`
+- **Workspace-relative**: `"src/config.ts"`
+- **Search-relative**: `"config.ts"` (if searching in `src/`)
+- **Leading slash variants**: `"/src/config.ts"`
+
+## Comparison
+
+<CardGroup cols={2}>
+  <Card title="grep_search" icon="magnifying-glass">
+    **Use for**: Searching file **contents**
+    
+    - Find where a function is used
+    - Locate TODO comments
+    - Search for regex patterns in code
+    - Get line numbers and context
+  </Card>
+  
+  <Card title="find_files" icon="folder-tree">
+    **Use for**: Finding files by **name**
+    
+    - List all test files
+    - Find configuration files
+    - Discover files by extension
+    - Build file inventories
+  </Card>
+</CardGroup>
+
+## Best Practices
+
+<AccordionGroup>
+  <Accordion title="Use specific patterns" icon="target">
+    Narrow your search scope to reduce noise:
+    
+    ```json
+    // Too broad
+    { "pattern": "error" }
+    
+    // Better
+    { "pattern": "Error:", "path": "src", "include": "*.ts" }
+    ```
+  </Accordion>
+  
+  <Accordion title="Combine tools for workflows" icon="link">
+    Use `find_files` to discover, then `read_file` to inspect:
+    
+    ```typescript
+    // 1. Find config files
+    const files = await executeVoiceTool("find_files", 
+      JSON.stringify({ pattern: "**/config.json" }), 
+      workspace
+    );
+    
+    // 2. Read each one
+    for (const file of files.split("\n").filter(f => !f.startsWith("["))) {
+      const content = await executeVoiceTool("read_file",
+        JSON.stringify({ path: file }),
+        workspace
+      );
+      // ... process content ...
+    }
+    ```
+  </Accordion>
+  
+  <Accordion title="Handle truncation" icon="scissors">
+    Check for truncation markers:
+    
+    ```typescript
+    const result = await executeVoiceTool("grep_search", args, workspace);
+    
+    if (result.includes("[Output truncated at 100KB]")) {
+      console.warn("Results truncated. Use more specific pattern.");
+    }
+    
+    if (result.includes("[Results truncated at 200 entries]")) {
+      console.warn("Too many files. Narrow your pattern.");
+    }
+    ```
+  </Accordion>
+  
+  <Accordion title="Respect hidden files" icon="eye-slash">
+    By default, dotfiles are excluded. Enable explicitly when needed:
+    
+    ```json
+    // Find all hidden config files
+    {
+      "pattern": ".*rc",
+      "include_hidden": true
+    }
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Skipped Directories
+
+Both tools automatically skip common large directories:
+
+- `.git` — Git repository metadata
+- `.build` — Swift build artifacts
+- `node_modules` — Node.js dependencies
+
+From `voice-tools.ts:38`:
+
+```typescript
+const SKIP_DIRS = new Set([".git", ".build", "node_modules"]);
+```
+
+## Performance Tips
+
+<CardGroup cols={2}>
+  <Card title="Limit Scope" icon="crosshairs">
+    Search subdirectories instead of entire workspace:
+    
+    ```json
+    {
+      "pattern": "*.test.ts",
+      "path": "src/daemon"
+    }
+    ```
+  </Card>
+  
+  <Card title="Use File Filters" icon="filter">
+    Filter by extension to reduce grep work:
+    
+    ```json
+    {
+      "pattern": "interface",
+      "include": "*.ts"
+    }
+    ```
+  </Card>
+  
+  <Card title="Specific Patterns" icon="bullseye">
+    Use anchored regex to reduce matches:
+    
+    ```json
+    // Slow: matches everywhere
+    { "pattern": "test" }
+    
+    // Fast: word boundary
+    { "pattern": "\\btest\\b" }
+    ```
+  </Card>
+  
+  <Card title="Parse Results" icon="code">
+    Filter out metadata lines:
+    
+    ```typescript
+    const files = result
+      .split("\n")
+      .filter(line => !line.startsWith("["));
+    ```
+  </Card>
+</CardGroup>
+
+## Related Tools
+
+<CardGroup cols={2}>
+  <Card title="Bash" icon="terminal" href="/api/voice-tools/bash">
+    Use bash for advanced grep/find with pipes
+  </Card>
+  
+  <Card title="File Operations" icon="file" href="/api/voice-tools/file-operations">
+    Read files discovered by search tools
+  </Card>
+</CardGroup>

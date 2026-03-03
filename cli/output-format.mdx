@@ -1,0 +1,263 @@
+---
+title: Output Format
+description: Understanding terminal output formats, event types, and JSON streaming mode
+---
+
+## Text Mode (Default)
+
+By default, `duck` and `duck say` render events as formatted, colored text with tagged prefixes.
+
+### Event Prefixes
+
+Each event type is rendered with a distinctive prefix:
+
+- `[text]` - Assistant message content
+- `[thinking]` - Model reasoning (only with `--show-thinking`)
+- `[tool:name]` - Tool execution start
+- `[tool:name output]` - Tool execution results
+- `[error]` - Error messages
+- `[compaction]` - Context compaction events
+- `[retry]` - Auto-retry attempts
+
+### Example Output
+
+```bash
+$ duck say "list files in src/"
+
+[tool:bash] Running: ls -la src/
+[tool:bash output]
+total 32
+drwxr-xr-x  5 alice  staff   160 Mar  3 10:00 .
+drwxr-xr-x  8 alice  staff   256 Mar  3 09:45 ..
+-rw-r--r--  1 alice  staff  1024 Mar  3 10:00 index.ts
+-rw-r--r--  1 alice  staff  2048 Mar  3 09:58 utils.ts
+
+[text] I found 2 TypeScript files in the src/ directory:
+- index.ts (1 KB)
+- utils.ts (2 KB)
+```
+
+### Color Support
+
+Colors are automatically enabled when:
+- `stdout` is a TTY (interactive terminal)
+- `NO_COLOR` environment variable is not set
+- Terminal supports color (checked via `node:util` styleText)
+
+Colors are automatically disabled when:
+- Output is piped to a file or another command
+- `NO_COLOR` is set to any value
+- `--no-color` flag is used
+
+Force colors in non-TTY environments:
+```bash
+duck say "test" --color | less -R
+```
+
+### Thinking Blocks
+
+By default, model reasoning is hidden for cleaner output. Show it with `--show-thinking`:
+
+```bash
+$ duck say "refactor this" --show-thinking
+
+[thinking] Let me analyze the code structure first...
+[thinking] I should extract the validation logic into a separate function.
+[text] I'll refactor this by creating a validateInput function...
+```
+
+## JSON Mode
+
+Get raw NDJSON (newline-delimited JSON) events for programmatic parsing.
+
+```bash
+duck say "run tests" --json
+```
+
+### Event Stream Format
+
+Each line is a complete JSON object representing a Pi event:
+
+```json
+{"type":"agent_start","agentId":"agent-abc123"}
+{"type":"message_update","assistantMessageEvent":{"type":"text_delta","text":"Running"}}
+{"type":"tool_execution_start","toolCallId":"call-xyz","name":"bash","arguments":{"command":"npm test"}}
+{"type":"tool_execution_update","toolCallId":"call-xyz","output":"PASS tests/auth.test.ts\n"}
+{"type":"tool_execution_end","toolCallId":"call-xyz"}
+{"type":"message_update","assistantMessageEvent":{"type":"text_delta","text":"All tests passed!"}}
+{"type":"agent_end"}
+```
+
+### Event Types
+
+All events follow the `PiEvent` union type from the Pi protocol:
+
+#### Lifecycle Events
+
+**agent_start**
+```json
+{"type":"agent_start","agentId":"agent-abc123"}
+```
+
+**agent_end**
+```json
+{"type":"agent_end"}
+```
+
+#### Message Events
+
+**message_update** - Streaming text or thinking deltas
+```json
+{
+  "type": "message_update",
+  "assistantMessageEvent": {
+    "type": "text_delta",
+    "text": "Here's the solution..."
+  }
+}
+```
+
+Assistant message event types:
+- `text_start` - Begin text response
+- `text_delta` - Incremental text chunk
+- `text_end` - Text response complete
+- `thinking_start` - Begin reasoning block
+- `thinking_delta` - Incremental reasoning chunk
+- `thinking_end` - Reasoning complete
+- `error` - Error in message generation
+
+#### Tool Events
+
+**tool_execution_start** - Tool invocation begins
+```json
+{
+  "type": "tool_execution_start",
+  "toolCallId": "call-xyz789",
+  "name": "read",
+  "arguments": {"filePath": "/src/app.ts"}
+}
+```
+
+**tool_execution_update** - Streaming tool output
+```json
+{
+  "type": "tool_execution_update",
+  "toolCallId": "call-xyz789",
+  "output": "export function main() {\n  console.log('Hello');\n}\n"
+}
+```
+
+**tool_execution_end** - Tool execution complete
+```json
+{
+  "type": "tool_execution_end",
+  "toolCallId": "call-xyz789"
+}
+```
+
+#### Error Events
+
+**prompt_error** - Failed to process prompt
+```json
+{
+  "type": "prompt_error",
+  "error": "API rate limit exceeded"
+}
+```
+
+**extension_error** - Extension or tool error
+```json
+{
+  "type": "extension_error",
+  "error": "File not found: /missing.txt",
+  "extensionName": "filesystem"
+}
+```
+
+#### Context Management Events
+
+**auto_compaction_start** - Context pruning begins
+```json
+{"type":"auto_compaction_start"}
+```
+
+**auto_compaction_end** - Context pruning complete
+```json
+{"type":"auto_compaction_end"}
+```
+
+**auto_retry_start** - Retrying after error
+```json
+{"type":"auto_retry_start"}
+```
+
+**auto_retry_end** - Retry complete
+```json
+{"type":"auto_retry_end"}
+```
+
+#### UI Events
+
+**extension_ui_request** - Interactive prompt needed
+```json
+{
+  "type": "extension_ui_request",
+  "id": "ui-req-123",
+  "method": "confirm",
+  "params": {
+    "message": "Delete 5 files?",
+    "default": false
+  }
+}
+```
+
+In JSON mode, UI requests are NOT automatically handled. You must respond via the daemon's `extension_ui_response` method.
+
+In text mode, UI requests are automatically handled via `@clack/prompts` (confirm, select, text input).
+
+## Parsing Examples
+
+### Filter Text Output
+
+```bash
+duck say "summarize errors" --json | jq -r 'select(.type=="message_update" and .assistantMessageEvent.type=="text_delta") | .assistantMessageEvent.text'
+```
+
+### Extract Tool Calls
+
+```bash
+duck say "run linter" --json | jq -c 'select(.type=="tool_execution_start")'
+```
+
+### Count Events by Type
+
+```bash
+duck say "test" --json | jq -s 'group_by(.type) | map({type: .[0].type, count: length})'
+```
+
+### Monitor for Errors
+
+```bash
+duck say "build project" --json | jq -r 'select(.type=="prompt_error" or .type=="extension_error") | .error'
+```
+
+## Visibility Filtering
+
+Not all events are shown in text mode by default. Here's what's visible:
+
+**Always visible:**
+- Text deltas
+- Tool executions (start, updates, end)
+- Errors (prompt_error, extension_error)
+- Context management (compaction, retry)
+- UI requests (except `setStatus`)
+
+**Hidden by default:**
+- Thinking blocks (use `--show-thinking`)
+- Internal status updates (`setStatus` UI events)
+- Agent lifecycle events (start/end markers)
+
+**Only in JSON mode:**
+- All raw Pi protocol events
+- Exact event timing and IDs
+- Complete tool arguments and metadata

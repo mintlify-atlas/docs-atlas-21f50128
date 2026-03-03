@@ -1,0 +1,593 @@
+---
+title: Session Model
+description: Workspaces, sessions, concurrency, and persistence
+---
+
+Rubber Duck's session model enables multi-session workflows with clean separation between workspaces, conversation threads, and concurrent background work.
+
+## Core Concepts
+
+### Workspace
+
+A **workspace** is a directory (typically a git repo) with a unique ID.
+
+**Workspace ID**: SHA-256 hash of the absolute, standardized path:
+
+```typescript
+export function workspaceId(path: string): string {
+  const normalized = path.replace(/\/+$/, "");  // Remove trailing slashes
+  return createHash("sha256").update(normalized).digest("hex");
+}
+```
+
+**Metadata**:
+```typescript
+interface Workspace {
+  id: string;           // Hash of path
+  path: string;         // Absolute path
+  createdAt: string;    // ISO timestamp
+  lastAttachedAt: string;
+  activeSessionId?: string;  // Currently active CLI session
+}
+```
+
+**Git Root Detection**:
+When you run `duck .`, the CLI searches upward for `.git` and uses the repo root as the workspace path. This ensures consistent workspace IDs across subdirectories.
+
+```typescript
+export function findGitRoot(startPath: string): string | null {
+  let current = path.resolve(startPath);
+  while (current !== "/") {
+    if (existsSync(path.join(current, ".git"))) {
+      return current;
+    }
+    current = path.dirname(current);
+  }
+  return null;  // Not in a git repo
+}
+```
+
+### Session
+
+A **session** is one conversation thread bound to a workspace.
+
+**Session ID**: UUID v4 (e.g., `550e8400-e29b-41d4-a716-446655440000`)
+
+**Metadata**:
+```typescript
+interface Session {
+  id: string;              // UUID
+  workspaceId: string;     // Parent workspace
+  name?: string;           // User-friendly name (optional)
+  createdAt: string;       // ISO timestamp
+  lastActiveAt: string;    // Last user interaction
+  piSessionFile: string;   // Path to Pi JSONL file
+  historyFile: string;     // Path to voice conversation history (app only)
+  status: "active" | "idle" | "running";
+}
+```
+
+**Session Lifecycle**:
+1. **Created**: User runs `duck attach` or `duck new`
+2. **Active**: Currently selected for voice or CLI input
+3. **Running**: Pi agent is processing a turn
+4. **Idle**: Pi is waiting for next prompt
+5. **Terminated**: Pi process exited (on demand or error)
+
+### Active Voice Session
+
+The **active voice session** is the session that receives voice input when the user presses the hotkey.
+
+- Only **one** session can be active for voice at a time
+- Voice session can differ from CLI session (e.g., talk to one session, monitor another in terminal)
+- Tracked in `metadata.json` at the workspace level
+
+**Switching**:
+```bash
+# From CLI
+duck use my-feature-work
+
+# From menu bar popover
+# (user clicks session name)
+```
+
+The daemon updates `metadata.json` and pushes a `voice_session_changed` event to the app.
+
+## Persistence
+
+### Metadata Store (`metadata.json`)
+
+All workspace and session metadata is stored in a single JSON file:
+
+```
+~/Library/Application Support/RubberDuck/metadata.json
+```
+
+**Structure**:
+```json
+{
+  "version": 1,
+  "workspaces": {
+    "<workspaceId>": {
+      "id": "abc123...",
+      "path": "/Users/me/my-repo",
+      "createdAt": "2024-01-15T10:30:00Z",
+      "lastAttachedAt": "2024-01-20T14:22:00Z",
+      "activeSessionId": "550e8400-..."
+    }
+  },
+  "sessions": {
+    "<sessionId>": {
+      "id": "550e8400-...",
+      "workspaceId": "abc123...",
+      "name": "debug-tests",
+      "createdAt": "2024-01-15T10:30:00Z",
+      "lastActiveAt": "2024-01-20T14:22:00Z",
+      "piSessionFile": "/path/to/pi-sessions/<sessionId>.jsonl",
+      "historyFile": "/path/to/pi-sessions/<sessionId>.jsonl",
+      "status": "active"
+    }
+  }
+}
+```
+
+**Atomic Writes** (`cli/src/daemon/metadata-store.ts:106-118`):
+
+To prevent corruption, updates use write-rename:
+
+```typescript
+private save(): void {
+  const data = JSON.stringify(this.data, null, 2);
+  const tempPath = `${METADATA_PATH}.tmp`;
+  
+  writeFileSync(tempPath, data, "utf-8");
+  renameSync(tempPath, METADATA_PATH);  // Atomic on POSIX
+}
+```
+
+If the daemon crashes mid-write, the old file remains intact.
+
+### Pi Session Files (JSONL)
+
+Pi stores conversation history as newline-delimited JSON:
+
+```
+~/Library/Application Support/RubberDuck/pi-sessions/<sessionId>.jsonl
+```
+
+**Example Content**:
+```jsonl
+{"type":"user","content":"Fix the bug in server.ts","timestamp":1705318200}
+{"type":"assistant","content":"I'll help fix that. Let me check the code.","timestamp":1705318201}
+{"type":"tool_call","tool":"read","args":{"path":"server.ts"},"timestamp":1705318202}
+{"type":"tool_result","output":"...file contents...","timestamp":1705318203}
+{"type":"assistant","content":"I found the issue. Here's the fix.","timestamp":1705318210}
+```
+
+Pi manages this file automatically. Rubber Duck only:
+- Specifies `--session-dir` when spawning Pi
+- Tracks the file path in `metadata.json`
+- Reads history on demand for diagnostics
+
+**Resume Behavior**:
+When Pi starts with `--session <file>`, it loads the full history into context (subject to token limits). This enables seamless continuation across app restarts.
+
+### Voice Conversation History
+
+The macOS app maintains a **separate** conversation history for voice sessions:
+
+```
+~/Library/Application Support/RubberDuck/pi-sessions/<sessionId>.jsonl
+```
+
+**Why Separate?**
+- Voice sessions use OpenAI Realtime API, not Pi
+- History includes audio transcripts, barge-in events, and tool calls
+- Pi session files are for Pi's internal state
+
+**Event Types** (`RubberDuck/ConversationHistory.swift`):
+```swift
+enum ConversationEventType: String, Codable {
+    case userText         // Typed input or final transcript
+    case userAudio        // speech_started, speech_stopped
+    case assistantText    // Text-only response
+    case assistantAudio   // TTS response (transcript)
+    case toolCall         // Function call from Realtime API
+}
+```
+
+**Sample Entry**:
+```json
+{
+  "timestamp": "2024-01-20T14:22:15Z",
+  "sessionID": "550e8400-...",
+  "type": "userAudio",
+  "text": "Fix the bug in app.ts",
+  "metadata": { "state": "speech_stopped" }
+}
+```
+
+This history is displayed in the CLI when following a voice session and is used for context in subsequent voice turns.
+
+## Concurrency
+
+### Multiple Pi Processes
+
+Rubber Duck supports **concurrent sessions** with multiple Pi subprocesses:
+
+```
+Workspace: ~/my-repo
+  ├─ Session: debug-tests (PID 1234, active)
+  └─ Session: refactor-module (PID 1235, running in background)
+
+Workspace: ~/other-repo
+  └─ Session: feature-auth (PID 1236, idle)
+```
+
+Each session has:
+- Independent Pi subprocess
+- Independent event stream
+- Independent conversation history
+
+**Daemon State** (`cli/src/daemon/pi-process-manager.ts`):
+```typescript
+export class PiProcessManager {
+  private processes = new Map<string, PiProcess>();  // sessionId → PiProcess
+
+  spawn(sessionId: string, workspacePath: string, options: SpawnOptions): PiProcess {
+    const piProcess = new PiProcess(workspacePath, options);
+    this.processes.set(sessionId, piProcess);
+    
+    // Forward events to event bus
+    piProcess.onEvent((event) => {
+      this.eventBus.publish(sessionId, event);
+    });
+    
+    return piProcess;
+  }
+}
+```
+
+### Voice Exclusivity
+
+While multiple sessions can run concurrently, **voice input is exclusive**:
+
+- Only one session is the "active voice session"
+- When the user speaks, audio goes to that session's Realtime API connection
+- Other sessions continue running but don't speak
+- Background sessions can trigger notifications (future feature)
+
+**Switching Voice Session**:
+```bash
+# Terminal 1: Start session A
+duck ~/my-repo --name session-a
+
+# Terminal 2: Start session B
+duck ~/my-repo --name session-b
+
+# Switch voice to session-a
+duck use session-a
+
+# Now voice input goes to session-a
+# Terminal 2 continues streaming session-b events
+```
+
+### CLI Following
+
+Each CLI client can follow **one session** at a time, but multiple clients can follow the same session:
+
+**Subscription Model**:
+```
+EventBus:
+  session-a:
+    - client-1 (terminal window 1)
+    - client-2 (terminal window 2)
+  session-b:
+    - client-3 (terminal window 3)
+```
+
+All subscribers receive identical event streams in real-time.
+
+**Implementation** (`cli/src/daemon/event-bus.ts:23-34`):
+```typescript
+publish(sessionId: string, event: PiEvent) {
+  for (const [clientId, sessions] of this.subscriptions) {
+    const handler = sessions.get(sessionId);
+    if (handler) {
+      try {
+        handler(event);  // Send event to client's socket
+      } catch (error) {
+        // Client disconnected — clean up subscription
+        this.unsubscribe(clientId, sessionId);
+      }
+    }
+  }
+}
+```
+
+## Session Operations
+
+### Attach Workspace
+
+```bash
+duck ~/my-repo
+```
+
+**Flow**:
+1. CLI: Resolve workspace path (git root if in repo)
+2. CLI → Daemon: `attach` request
+3. Daemon: Upsert workspace in `metadata.json`
+4. Daemon: Check for existing active session
+   - If exists: Resume that session
+   - If none: Create new session with auto-generated ID
+5. Daemon: Spawn Pi with `--session <file>`
+6. Daemon: Subscribe client to session events
+7. Daemon → CLI: Return session metadata
+8. CLI: Start rendering event stream
+
+**Response**:
+```json
+{
+  "workspace": {
+    "id": "abc123...",
+    "path": "/Users/me/my-repo"
+  },
+  "session": {
+    "id": "550e8400-...",
+    "name": null,
+    "status": "active"
+  }
+}
+```
+
+### Create New Session
+
+```bash
+duck new --name my-feature
+```
+
+**Flow**:
+1. CLI → Daemon: `new_session` request with workspace and optional name
+2. Daemon: Generate UUID for session
+3. Daemon: Create session entry in `metadata.json`
+4. Daemon: Spawn Pi with fresh history (no `--session` flag)
+5. Daemon: Set as active session for workspace
+6. Daemon → CLI: Return session metadata
+
+### Switch Active Session
+
+```bash
+duck use debug-tests
+```
+
+**Flow**:
+1. CLI → Daemon: `use_session` request with session name/ID
+2. Daemon: Resolve session (by name, full ID, or prefix)
+3. Daemon: Update workspace's `activeSessionId` in `metadata.json`
+4. Daemon: Broadcast `voice_session_changed` event to voice app
+5. Daemon → CLI: Confirm switch
+
+**Voice App Sync**:
+```swift
+// DaemonSocketClient receives pushed event
+func handleEvent(_ event: [String: Any]) {
+    if event["event"] as? String == "voice_session_changed" {
+        let sessionId = event["sessionId"] as? String
+        // Update VoiceSessionCoordinator to bind new session
+    }
+}
+```
+
+### List Sessions
+
+```bash
+duck sessions
+```
+
+**Output**:
+```
+SESSION               NAME              STATUS    LAST ACTIVE
+550e8400-e29b-41d4    debug-tests       active    2m ago
+a1b2c3d4-e5f6-7890    refactor-module   running   10s ago
+```
+
+**Implementation**:
+1. CLI → Daemon: `sessions` request (optionally filtered by workspace)
+2. Daemon: Query `metadata.json` for sessions
+3. Daemon: Check Pi process status (alive, exit code)
+4. Daemon → CLI: Return session list with status
+5. CLI: Format as table
+
+### Abort Session
+
+```bash
+duck abort
+```
+
+**Flow**:
+1. CLI → Daemon: `abort` request for active session
+2. Daemon: Forward `abort` command to Pi process
+3. Pi: Stops current tool execution, cancels pending operations
+4. Pi → Daemon: `agent_end` event with `reason: "aborted"`
+5. Daemon → CLI: Stream abort event
+6. CLI: Display abort confirmation
+
+## Session Resolution
+
+The daemon accepts multiple session identifiers:
+
+1. **Session Name**: `duck use debug-tests`
+2. **Full Session ID**: `duck use 550e8400-e29b-41d4-a716-446655440000`
+3. **Unambiguous Prefix**: `duck use 550e` (if no other session starts with `550e`)
+4. **Default**: Active session for current workspace (if in workspace) or global active session
+
+**Ambiguity Handling**:
+```typescript
+resolveSession(identifier: string): Session {
+  // Exact name match
+  const byName = this.findSessionByName(identifier);
+  if (byName) return byName;
+  
+  // Full ID match
+  if (this.sessions.has(identifier)) {
+    return this.sessions.get(identifier);
+  }
+  
+  // Prefix match
+  const matches = this.findSessionsByPrefix(identifier);
+  if (matches.length === 1) return matches[0];
+  if (matches.length > 1) {
+    throw new Error(`Ambiguous session identifier: "${identifier}" matches ${matches.length} sessions`);
+  }
+  
+  throw new Error(`Session not found: "${identifier}"`);
+}
+```
+
+## Workspace Confinement
+
+All Pi operations are confined to the workspace directory:
+
+**Pi Spawn** (`cli/src/daemon/pi-process.ts:76-80`):
+```typescript
+this.process = spawn(PI_BINARY, args, {
+  cwd: workspacePath,  // Pi executes all commands here
+  stdio: ["pipe", "pipe", "pipe"],
+  env: { ...process.env },
+});
+```
+
+**Voice Tool Execution** (`cli/src/daemon/voice-tools.ts`):
+```typescript
+export async function executeVoiceTool(
+  toolName: string,
+  args: Record<string, unknown>,
+  workspacePath: string
+): Promise<string> {
+  // All file paths resolved relative to workspacePath
+  // All bash commands executed with cwd=workspacePath
+}
+```
+
+**Security Considerations**:
+- Tools can escape workspace via absolute paths or `..` (not currently blocked)
+- Future: Add `--sandbox` mode to enforce strict confinement
+- Bash commands can access network (e.g., `curl`)
+- Future: Add "Safe mode" to restrict bash to allowlist (PRD Section 13)
+
+## Session Cleanup
+
+### Manual Cleanup
+
+```bash
+duck kill <session>
+```
+
+**Flow**:
+1. Daemon: Send `SIGTERM` to Pi process
+2. Daemon: Wait up to 5s for graceful exit
+3. Daemon: Send `SIGKILL` if still alive
+4. Daemon: Remove from active process map
+5. Daemon: Update session status in `metadata.json`
+
+**Note**: Session history files are **not** deleted. They can be resumed later.
+
+### Automatic Cleanup
+
+- **Daemon Shutdown**: All Pi processes receive `SIGTERM` → `SIGKILL`
+- **Process Crash**: Health monitor detects dead process, publishes `pi_died` event, updates metadata
+- **CLI Disconnect**: Daemon unsubscribes client but keeps Pi process alive (background work)
+
+### Purge Old Sessions
+
+```bash
+duck prune --older-than 30d
+```
+
+**Flow**:
+1. Daemon: Query sessions with `lastActiveAt` > 30 days ago
+2. Daemon: Kill any running processes for those sessions
+3. Daemon: Delete session entries from `metadata.json`
+4. Daemon: Optionally delete session JSONL files
+5. Daemon → CLI: Report purged sessions
+
+**(Not implemented in v1, future feature)**
+
+## Metadata Schema
+
+### Workspace
+
+```typescript
+interface Workspace {
+  id: string;                  // SHA-256(path)
+  path: string;                // Absolute path
+  createdAt: string;           // ISO 8601
+  lastAttachedAt: string;      // ISO 8601
+  activeSessionId?: string;    // Current CLI session
+}
+```
+
+### Session
+
+```typescript
+interface Session {
+  id: string;                  // UUID v4
+  workspaceId: string;         // Parent workspace ID
+  name?: string;               // User-friendly name (optional)
+  createdAt: string;           // ISO 8601
+  lastActiveAt: string;        // ISO 8601
+  piSessionFile: string;       // Path to Pi JSONL
+  historyFile: string;         // Path to voice conversation JSONL (app)
+  status: "active" | "idle" | "running";
+}
+```
+
+### Voice Session Selection (CLI Metadata)
+
+The CLI writes a lightweight metadata file for the voice app to read:
+
+```
+~/Library/Application Support/RubberDuck/metadata.json
+```
+
+**Selection Entry**:
+```json
+{
+  "version": 1,
+  "selection": {
+    "workspacePath": "/Users/me/my-repo",
+    "sessionId": "550e8400-...",
+    "sessionName": "debug-tests",
+    "updatedAt": "2024-01-20T14:22:15Z"
+  }
+}
+```
+
+The app reads this on hotkey press to sync workspace and session before connecting to the Realtime API.
+
+## Performance Characteristics
+
+### Metadata Operations
+
+- **Workspace lookup**: O(1) hash map
+- **Session lookup**: O(1) hash map
+- **Session list**: O(n) iteration (n = total sessions)
+- **Metadata write**: ~10ms (JSON serialize + atomic rename)
+
+### Pi Process Overhead
+
+- **Spawn time**: ~200ms (Pi initialization + model config)
+- **Memory per process**: ~50-100 MB (base) + model context
+- **Concurrent limit**: No hard limit, but recommend &lt;10 simultaneous sessions (each runs a full agent loop)
+
+### Event Bus Throughput
+
+- **Event publish**: O(m) where m = subscribed clients for that session
+- **Typical latency**: &lt;5ms from Pi stdout → client socket
+- **Backpressure**: Slow clients block event delivery (trade-off: simplicity vs. async buffering)
+
+## Next Steps
+
+- [Architecture Overview](/architecture/overview) — Full system diagram
+- [Voice Pipeline](/architecture/voice-pipeline) — Audio I/O and OpenAI Realtime API
+- [Pi Integration](/architecture/pi-integration) — RPC protocol and tool execution
